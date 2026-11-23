@@ -7,9 +7,7 @@ mapping. Every guess is labelled as a guess.
 
 from __future__ import annotations
 
-import re
-
-from .netlist import _element_nodes, find_subckts, top_level_elements
+from .netlist import _element_nodes, defined_models, element_model, find_subckts, top_level_elements
 
 KIND_LABELS = {
     "R": "Resistor", "C": "Capacitor", "L": "Inductor", "V": "Voltage source",
@@ -21,30 +19,8 @@ PASSIVE = set("RCLK")
 SWITCHING = set("SMQDJWX")
 GND_NAMES = {"0", "gnd", "agnd", "pgnd", "vss"}
 
-_MODEL_RE = re.compile(r"^\s*\.model\s+(\S+)\s+(\w+)", re.IGNORECASE)
-
-
 def _is_gnd(node: str) -> bool:
     return node.lower() in GND_NAMES
-
-
-def _model_of(toks: list[str]) -> str | None:
-    """Name of the model / subcircuit an element refers to (None for plain R/L/C/V/I)."""
-    kind = toks[0][0].upper()
-    if kind == "X":
-        body = [t for t in toks[1:] if "=" not in t and not t.lower().startswith("params:")]
-        return body[-1] if body else None
-    if kind == "D" and len(toks) >= 4:
-        return toks[3]
-    if kind in "MS" and len(toks) >= 6:
-        return toks[5]
-    if kind == "Q" and len(toks) >= 5:
-        return toks[4]
-    if kind == "J" and len(toks) >= 5:
-        return toks[4]
-    if kind == "W" and len(toks) >= 5:
-        return toks[4]
-    return None
 
 
 def _value_of(toks: list[str]) -> str:
@@ -90,11 +66,7 @@ def describe(stmts: list[str], subckt: str | None = None) -> dict:
         if sc is not None:
             source_elements = _subckt_elements(stmts, sc)
             scope = sc.name
-    model_defs: dict[str, str] = {}
-    for s in stmts:
-        m = _MODEL_RE.match(s)
-        if m:
-            model_defs[m.group(1).lower()] = m.group(2).upper()
+    defined = defined_models(stmts)
 
     elements: list[dict] = []
     net_members: dict[str, list[str]] = {}
@@ -102,10 +74,10 @@ def describe(stmts: list[str], subckt: str | None = None) -> dict:
         name = toks[0]
         kind = name[0].upper()
         nodes = _element_nodes(toks)
-        model = _model_of(toks)
+        model = element_model(toks, defined)
         if model is None:
             source = "builtin"  # plain R/L/C/V/I: ideal SPICE element
-        elif model.lower() in subckts or model.lower() in model_defs:
+        elif model.lower() in defined:
             source = "defined"  # .subckt / .model found in the netlist or uploaded files
         else:
             source = "missing"  # not found: LTspice may supply it from its own library

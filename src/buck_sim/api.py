@@ -365,10 +365,15 @@ def _analyse(up: Upload, engine: Engine, s: Settings) -> dict:
             info["bom"] = {"name": up.bom_name, **cross_check(items, info["topology"]["elements"])}
         except BomError as e:
             info["bom"] = {"name": up.bom_name, "error": str(e)}
+    model_files = [n for n in up.files if n != up.netlist_name]
+    checked = f"checked: {', '.join(model_files)}" if model_files else "no model files were uploaded"
     for m in info["topology"]["models"]["vendor"]:
         if m["source"] == "missing":
-            hint = " (LTspice may provide it from its library)" if engine.supports_builtin_libs else ""
-            info["warnings"].append(f"{m['element']}: model {m['model']!r} is not defined in the uploaded files{hint}")
+            hint = "; LTspice may provide it from its own library" if engine.supports_builtin_libs else ""
+            info["warnings"].append(
+                f"{m['element']}: model {m['model']!r} is not defined in any uploaded file ({checked}){hint}. "
+                "Upload the file that contains its .model or .subckt line."
+            )
     info["engine"] = engine.name
     return info
 

@@ -240,3 +240,57 @@ def test_ai_refusal_is_reported():
 
 def test_all_tests_known():
     assert set(TEST_NAMES) == {"steady_state", "load_transient", "line_transient", "line_regulation", "load_regulation"}
+
+
+# --------------------------------------------------------------------------- model files
+USER_NET = b"""* buck with vendor parts, no .include line (as LTspice exports it)
+V1 in 0 12
+XU1 in sw fb 0 MYCTRL
+M1 in gate sw BSC010 m=1
+Q1 c b e s QMOD
+L1 sw out 10u
+C1 out 0 22u
+Rload out 0 5
+.end
+"""
+VENDOR_LIB = b"""* vendor
+.subckt MYCTRL vin sw fb gnd
+R1 vin sw 1
+.ends MYCTRL
+.model BSC010 VDMOS(Rds=1m)
+.model QMOD NPN
+"""
+
+
+def test_uploaded_lib_without_include_is_added():
+    p = NetlistLoader({"buck.cir": USER_NET, "vendor.lib": VENDOR_LIB,
+                       "other.lib": b"* x\n.tran 1u\n.model OTHER D\n"}).load_main("buck.cir")
+    srcs = {m["element"]: (m["model"], m["source"]) for m in describe(p.statements)["models"]["vendor"]}
+    assert srcs == {"XU1": ("MYCTRL", "defined"), "M1": ("BSC010", "defined"), "Q1": ("QMOD", "defined")}
+    assert any("vendor.lib" in w and "added automatically" in w for w in p.warnings)
+    assert not any("OTHER" in s for s in p.statements)  # unrelated file left out
+    assert not any("other.lib" in w for w in p.warnings)  # and leaves no notes behind
+
+
+def test_missing_model_names_the_checked_files(srv):
+    files = [("netlist", ("buck.cir", USER_NET)), ("models", ("wrong.lib", b"* nothing here\n.model X D\n"))]
+    r = requests.post(f"{srv.url}/api/inspect", files=files)
+    assert r.status_code == 200, r.text
+    w = " ".join(r.json()["warnings"])
+    assert "'MYCTRL' is not defined in any uploaded file (checked: wrong.lib)" in w
+
+
+@pytest.mark.ngspice
+@pytest.mark.skipif(__import__("shutil").which("ngspice") is None, reason="ngspice is not installed")
+def test_ngspice_runs_demo_without_include_line(tmp_path, settings, spec_dict):
+    from buck_sim.engines.ngspice import NgspiceEngine
+    from buck_sim.runner import RunContext, run_job
+
+    net = (EXAMPLES / "buck_demo.cir").read_text().replace('.include "toyctrl.lib"', "")
+    files = {"buck_demo.cir": net.encode(), "toyctrl.lib": (EXAMPLES / "toyctrl.lib").read_bytes()}
+    spec = JobSpec.model_validate(dict(spec_dict, tests=["steady_state"], limits={}))
+    res = run_job(tmp_path / "job", spec, files, "buck_demo.cir", RunContext(NgspiceEngine(), replace(settings, engine="ngspice")))
+    t = res["tests"][0]
+    assert t["status"] == "ok", t["error"]
+    assert t["metrics"]["vout_mean_v"] == pytest.approx(5.0, abs=0.15)
+    assert any("added automatically" in w for w in res["warnings"])

@@ -140,10 +140,49 @@ class NetlistLoader:
         if key not in self._files:
             raise NetlistError(f"netlist file {name!r} was not uploaded")
         self.warnings = []
+        self._used: set[str] = set()
         stmts = self._process_file(key, depth=0, stack=(), section=None, is_main=True)
         if not stmts:
             raise NetlistError("the netlist is empty after removing comments and analysis cards")
+        stmts = self._auto_include(stmts, key)
         return ParsedNetlist(statements=stmts, warnings=list(dict.fromkeys(w for w in self.warnings if w)))
+
+    def _auto_include(self, stmts: list[str], main_key: str) -> list[str]:
+        """Add uploaded model files the netlist never ``.include``s but whose models it uses.
+
+        LTspice finds models in its own library folders, so exported netlists often
+        have no ``.include`` line for them. Only files that define a missing model or
+        subcircuit are added, each once, and the user is told.
+        """
+        for _ in range(MAX_INCLUDE_DEPTH):  # a pulled-in subckt can need another file
+            missing = missing_models(stmts)
+            if not missing:
+                break
+            added = False
+            for fkey, (display, _) in sorted(self._files.items()):
+                if fkey == main_key or fkey in self._used:
+                    continue
+                used_before, warn_before = set(self._used), len(self.warnings)
+                try:
+                    body = self._process_file(fkey, depth=1, stack=(main_key,), section=None, is_main=False)
+                    provides = sorted(missing[n] for n in defined_models(body) if n in missing)
+                except NetlistError:
+                    provides = []  # not a usable model file; the regular error paths still apply
+                if not provides:
+                    self._used, self.warnings[warn_before:] = used_before, []
+                    continue
+                stmts = stmts + body
+                added = True
+                self.warnings.append(
+                    f"{display!r} is not .include'd by the netlist; it was added automatically because it "
+                    f"defines {', '.join(provides[:6])}{' …' if len(provides) > 6 else ''}"
+                )
+                missing = missing_models(stmts)
+                if not missing:
+                    break
+            if not added:
+                break
+        return stmts
 
     # -- internals ---------------------------------------------------------- #
     def _process_file(
@@ -160,6 +199,8 @@ class NetlistLoader:
         if key in stack:
             raise NetlistError(f"circular include of {self._files[key][0]!r}")
         display, text = self._files[key]
+        if hasattr(self, "_used"):
+            self._used.add(key)
         for marker in _ENCRYPTED_MARKERS:
             if marker in text:
                 raise NetlistError(
@@ -341,6 +382,63 @@ def _element_nodes(toks: list[str]) -> list[str]:
         body = [t for t in toks[1:] if "=" not in t and not t.lower().startswith("params:")]
         return body[:-1]  # last token is the subcircuit name
     return []
+
+
+_NUMBER_RE = re.compile(r"^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?[a-zA-Z]*$")
+_MODEL_DEF_RE = re.compile(r"^\.model\s+(\S+)", re.IGNORECASE)
+
+
+def _is_param(tok: str) -> bool:
+    t = tok.lower()
+    return "=" in t or t in ("params:", "on", "off") or bool(_NUMBER_RE.match(t))
+
+
+def element_model(toks: list[str], defined: set[str] | frozenset[str] = frozenset()) -> str | None:
+    """Name of the model / subcircuit an element refers to (None for plain R/L/C/V/I...).
+
+    Node counts vary (MOSFET with 3 or 4 nodes, BJT with or without substrate), so
+    when ``defined`` (lower-case names) is given, a candidate that is defined wins.
+    """
+    kind = toks[0][0].upper()
+    if kind == "X":
+        body = []
+        for t in toks[1:]:
+            if t.lower() == "params:" or "=" in t:
+                break
+            body.append(t)
+        return body[-1] if len(body) >= 1 else None
+    positions = {"D": (3,), "M": (5, 4), "Q": (5, 4), "J": (4,), "S": (5,), "W": (4,), "Z": (4,)}.get(kind)
+    if positions is None:
+        return None
+    cands = [toks[i] for i in positions if i < len(toks) and not _is_param(toks[i])]
+    for c in cands:
+        if c.lower() in defined:
+            return c
+    return cands[0] if cands else None
+
+
+def defined_models(stmts: list[str]) -> set[str]:
+    """Lower-case names of every .subckt and .model in the statements."""
+    names = set(find_subckts(stmts))
+    for s in stmts:
+        m = _MODEL_DEF_RE.match(s)
+        if m:
+            names.add(m.group(1).lower())
+    return names
+
+
+def missing_models(stmts: list[str]) -> dict[str, str]:
+    """Models/subcircuits referenced by elements but defined nowhere: lower name -> name."""
+    defined = defined_models(stmts)
+    out: dict[str, str] = {}
+    for s in stmts:
+        if s.startswith("."):
+            continue
+        toks = s.split()
+        m = element_model(toks, defined)
+        if m and m.lower() not in defined:
+            out.setdefault(m.lower(), m)
+    return out
 
 
 def inspect(stmts: list[str]) -> dict:
