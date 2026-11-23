@@ -57,7 +57,7 @@ class NgspiceEngine(Engine):
         log_text = log.read_text(errors="replace") if log.exists() else ""
         if not raw.exists() or raw.stat().st_size == 0:
             raise EngineError(f"ngspice produced no output (exit code {code})", tail(log_text or out))
-        time, traces = read_raw_traces(raw)
+        time, traces = read_raw_traces(raw, dialect="ngspice")
         wf = waveforms_from_traces(time, traces, bundle.signals, self.name)
         wf.log_tail = tail(log_text or out)
         return wf

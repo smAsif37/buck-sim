@@ -69,7 +69,7 @@ class LTspiceEngine(Engine):
                 f"LTspice produced no output (exit code {code})",
                 tail(log_text or out),
             )
-        time, traces = read_raw_traces(raw)
+        time, traces = read_raw_traces(raw, dialect="ltspice")
         wf = waveforms_from_traces(time, traces, bundle.signals, self.name)
         wf.log_tail = tail(log_text)
         return wf

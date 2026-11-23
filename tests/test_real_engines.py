@@ -72,8 +72,10 @@ def test_ltspice_end_to_end(tmp_path, settings, example_files, spec_dict):
 @pytest.mark.ngspice
 @pytest.mark.skipif(shutil.which("ngspice") is None, reason="ngspice is not installed")
 @pytest.mark.parametrize("filetype", ["ascii", "binary"])
-def test_ngspice_raw_formats(tmp_path, filetype):
-    """Both raw formats must be readable (Linux ngspice defaults to binary, Windows to ascii)."""
+@pytest.mark.parametrize("old_header", [False, True], ids=["new-header", "no-command-line"])
+def test_ngspice_raw_formats(tmp_path, filetype, old_header):
+    """Both raw formats must be readable (Linux ngspice defaults to binary, Windows to ascii),
+    also without the "Command:" header line that ngspice only writes from v44 on."""
     import subprocess
 
     from buck_sim.engines.rawio import read_raw_traces
@@ -82,8 +84,15 @@ def test_ngspice_raw_formats(tmp_path, filetype):
     (tmp_path / "t.cir").write_text("t\nV1 a 0 SIN(0 1 1k)\nR1 a 0 1k\n.tran 1u 1m\n.end\n")
     eng = NgspiceEngine()
     subprocess.run([*eng.cmd, "-b", "-r", "t.raw", "t.cir"], cwd=tmp_path, capture_output=True, timeout=60)
-    header = (tmp_path / "t.raw").read_bytes()
-    assert (b"Binary:" if filetype == "binary" else b"Values:") in header
-    time, traces = read_raw_traces(tmp_path / "t.raw")
+    raw = tmp_path / "t.raw"
+    data = raw.read_bytes()
+    assert (b"Binary:" if filetype == "binary" else b"Values:") in data
+    if old_header:
+        # emulate ngspice < 44 (e.g. Debian's ngspice 39): drop the "Command:" line
+        head, sep, body = data.partition(b"Binary:\n" if filetype == "binary" else b"Values:\n")
+        head = b"".join(ln for ln in head.splitlines(keepends=True) if not ln.startswith(b"Command:"))
+        raw.write_bytes(head + sep + body)
+        assert b"Command:" not in raw.read_bytes()[:2000]
+    time, traces = read_raw_traces(raw, dialect="ngspice")
     assert len(time) > 100 and time[-1] == pytest.approx(1e-3)
     assert {k.lower() for k in traces} >= {"v(a)", "i(v1)"}

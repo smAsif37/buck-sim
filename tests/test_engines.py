@@ -105,7 +105,7 @@ def test_ltspice_engine_command_and_outputs(tmp_path, monkeypatch, example_files
         net.with_suffix(".log").write_text("Total elapsed time: 1 s\\n")
         """,
     )
-    monkeypatch.setattr(lt_mod, "read_raw_traces", lambda p: fake_traces_for(p))
+    monkeypatch.setattr(lt_mod, "read_raw_traces", lambda p, **kw: fake_traces_for(p))
     t, tr = fake_traces()
 
     def fake_traces_for(path):
@@ -178,7 +178,7 @@ def test_ngspice_engine_command_and_outputs(tmp_path, monkeypatch, example_files
         """,
     )
     t, tr = fake_traces(ltspice_style=False)
-    monkeypatch.setattr(ng_mod, "read_raw_traces", lambda p: (t, tr))
+    monkeypatch.setattr(ng_mod, "read_raw_traces", lambda p, **kw: (t, tr))
     wf = NgspiceEngine(fake).simulate(make_bundle(example_files, spec), tmp_path / "w", 20)
     assert wf.engine == "ngspice" and wf.log_tail == "ngspice log ok"
     with pytest.raises(EngineError, match="not found"):

@@ -11,14 +11,18 @@ from ..testbench import CTL_NODE, SignalNames
 from .base import EngineError, Waveforms
 
 
-def read_raw_traces(path: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Read every trace of a raw file with spicelib. Returns (time, traces)."""
+def read_raw_traces(path: Path, dialect: str | None = None) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Read every trace of a raw file with spicelib. Returns (time, traces).
+
+    ``dialect`` ("ngspice" / "ltspice") is passed to spicelib so files without a
+    "Command:" header line (ngspice before v44) can still be read.
+    """
     try:
         from spicelib import RawRead  # imported lazily: only real engines need it
     except ImportError as e:  # pragma: no cover - depends on the environment
         raise EngineError("the 'spicelib' package is required to read simulator output") from e
     try:
-        raw = RawRead(str(path))
+        raw = RawRead(str(path), dialect=dialect)
         names = list(raw.get_trace_names())
         # Read the traces before the axis: for binary raw files (ngspice on Linux,
         # LTspice) spicelib loads data lazily and only sets the axis once a trace
