@@ -14,7 +14,7 @@ from live import LiveServer
 from buck_sim import ai
 from buck_sim.bom import BomError, cross_check, parse_bom, parse_value
 from buck_sim.engines import EngineRegistry
-from buck_sim.netlist import NetlistLoader
+from buck_sim.netlist import NetlistError, NetlistLoader
 from buck_sim.registry import METRICS, TEST_NAMES
 from buck_sim.spec import JobSpec
 from buck_sim.topology import describe
@@ -270,6 +270,16 @@ def test_uploaded_lib_without_include_is_added():
     assert any("vendor.lib" in w and "added automatically" in w for w in p.warnings)
     assert not any("OTHER" in s for s in p.statements)  # unrelated file left out
     assert not any("other.lib" in w for w in p.warnings)  # and leaves no notes behind
+
+
+def test_encrypted_lib_without_include_reports_encryption():
+    enc = b"**$ENCRYPTED_LIB\n.SUBCKT MYCTRL A B\n$CDNENCSTART_ADV2\n0123abcd\n$CDNENCFINISH_ADV2\n.ENDS\n"
+    unrelated = b"* x\n.SUBCKT NOTUSED A B\n$CDNENCSTART_ADV2\nff\n$CDNENCFINISH_ADV2\n.ENDS\n"
+    with pytest.raises(NetlistError, match="encrypted"):
+        NetlistLoader({"buck.cir": USER_NET, "vendor.lib": VENDOR_LIB.replace(b"MYCTRL", b"XXX"),
+                       "mps.lib": enc}).load_main("buck.cir")
+    # an encrypted file that defines nothing the circuit uses is still just skipped
+    NetlistLoader({"buck.cir": USER_NET, "vendor.lib": VENDOR_LIB, "u.lib": unrelated}).load_main("buck.cir")
 
 
 def test_missing_model_names_the_checked_files(srv):

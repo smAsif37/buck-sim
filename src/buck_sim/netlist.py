@@ -52,6 +52,8 @@ DROPPED_DIRECTIVES = frozenset(
 
 _FILE_REF_RE = re.compile(r"\bfile\s*=", re.IGNORECASE)
 _ENCRYPTED_MARKERS = ("$CDNENCSTART", "$CDNENCFINISH", "$ENCRYPTED")
+# raw-text scan for names a file declares, used when the file itself can't be parsed
+_DECLARED_NAME_RE = re.compile(r"^[ \t]*\.(?:subckt|model)[ \t]+(\S+)", re.IGNORECASE | re.MULTILINE)
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +169,13 @@ class NetlistLoader:
                     body = self._process_file(fkey, depth=1, stack=(main_key,), section=None, is_main=False)
                     provides = sorted(missing[n] for n in defined_models(body) if n in missing)
                 except NetlistError:
-                    provides = []  # not a usable model file; the regular error paths still apply
+                    # Not usable (e.g. encrypted). If it declares a model the circuit needs,
+                    # that error is the real cause, so report it instead of "not defined".
+                    text = self._files[fkey][1]
+                    declared = {m.group(1).lower() for m in _DECLARED_NAME_RE.finditer(text)}
+                    if declared & set(missing):
+                        raise
+                    provides = []
                 if not provides:
                     self._used, self.warnings[warn_before:] = used_before, []
                     continue
