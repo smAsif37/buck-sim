@@ -20,8 +20,11 @@ def read_raw_traces(path: Path) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     try:
         raw = RawRead(str(path))
         names = list(raw.get_trace_names())
-        time = np.abs(np.asarray(raw.get_axis(0), dtype=float))
+        # Read the traces before the axis: for binary raw files (ngspice on Linux,
+        # LTspice) spicelib loads data lazily and only sets the axis once a trace
+        # has been read, so calling get_axis() first fails with "does not have an axis".
         traces = {n: np.asarray(raw.get_trace(n).get_wave(0), dtype=float) for n in names}
+        time = np.abs(np.asarray(raw.get_axis(0), dtype=float))
     except Exception as e:  # spicelib raises several exception types
         raise EngineError(f"could not read simulator output {path.name}: {e}") from e
     return time, traces
