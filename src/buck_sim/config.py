@@ -36,13 +36,16 @@ def _env_float(name: str, default: float) -> float:
 
 def detect_ltspice_cmd() -> str:
     """Best-effort default for LTSPICE_CMD (empty string when nothing is found)."""
+    local = os.environ.get("LOCALAPPDATA", "")
     candidates = [
         "/Applications/LTspice.app/Contents/MacOS/LTspice",
+        # "Only for me" install (no admin rights) and the all-users install
+        str(Path(local) / "Programs" / "ADI" / "LTspice" / "LTspice.exe") if local else "",
         r"C:\Program Files\ADI\LTspice\LTspice.exe",
         r"C:\Program Files\LTC\LTspiceXVII\XVIIx64.exe",
     ]
     for c in candidates:
-        if Path(c).exists():
+        if c and Path(c).exists():
             return f'"{c}"' if sys.platform == "win32" else c
     return ""
 
@@ -50,7 +53,7 @@ def detect_ltspice_cmd() -> str:
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = Path("./data")
-    engine: str = "ltspice"  # ltspice | ngspice | mock
+    engine: str = "ngspice"  # default engine: ngspice | ltspice | mock
     ltspice_cmd: str = ""
     ltspice_args: str = ""
     ngspice_cmd: str = "ngspice"
@@ -89,7 +92,7 @@ class Settings:
         e = os.environ
         builtin = e.get("ALLOWED_BUILTIN_LIBS")
         libs = frozenset(x.strip().lower() for x in builtin.split(",") if x.strip()) if builtin is not None else None
-        engine = e.get("ENGINE", "ltspice").strip().lower()
+        engine = e.get("ENGINE", "ngspice").strip().lower() or "ngspice"
         ltspice_cmd = e.get("LTSPICE_CMD", "").strip() or detect_ltspice_cmd()
         s = cls(
             data_dir=Path(e.get("DATA_DIR", "./data")),

@@ -104,10 +104,13 @@ async function download(path, filename) {
 /* ------------------------------------------------------------------- state */
 const state = {
   config: null,
-  inspect: null,
+  inspect: null, // last analysis result
   inspected: false,
+  ai: null, // last AI explanation
   inputs: {}, // design inputs
+  tol: {}, // tolerance inputs
   map: {}, // mapping inputs
+  autoFilled: new Set(), // mapping fields filled from the analysis
   limits: [],
   testBoxes: {},
   jobId: null,
@@ -115,20 +118,47 @@ const state = {
 };
 
 const DESIGN_FIELDS = [
-  { key: "vin_min", label: "Vin min", unit: "V", def: 9 },
-  { key: "vin_nom", label: "Vin nominal", unit: "V", def: 12 },
-  { key: "vin_max", label: "Vin max", unit: "V", def: 15 },
-  { key: "vout_nom", label: "Vout nominal", unit: "V", def: 5 },
-  { key: "iout_max", label: "Iout max", unit: "A", def: 2 },
-  { key: "iout_min", label: "Iout min (blank = 10 % of max)", unit: "A", def: "", optional: true },
-  { key: "fsw_hz", label: "Switching frequency", unit: "kHz", scale: 1e3, def: 500 },
-  { key: "startup_time_s", label: "Start-up time (blank = auto)", unit: "µs", scale: 1e-6, def: "", optional: true },
-  { key: "hold_time_s", label: "Hold per level (blank = auto)", unit: "µs", scale: 1e-6, def: "", optional: true },
-  { key: "measure_cycles", label: "Measurement window", unit: "cycles", def: 50, int: true },
-  { key: "load_slew_a_per_us", label: "Load slew rate", unit: "A/µs", def: 1 },
-  { key: "line_slew_v_per_us", label: "Line slew rate", unit: "V/µs", def: 1 },
-  { key: "settle_band_pct", label: "Settling band", unit: "%", def: 2 },
+  { key: "vin_min", label: "Vin min", unit: "V", def: 9, tip: "Lowest input voltage the converter must handle. Used for the line sweep and the line-transient low level." },
+  { key: "vin_nom", label: "Vin nominal", unit: "V", def: 12, tip: "Typical input voltage. Steady-state, load-transient and load-regulation tests run here." },
+  { key: "vin_max", label: "Vin max", unit: "V", def: 15, tip: "Highest input voltage. Used for the line sweep and the line-transient high level." },
+  { key: "vout_nom", label: "Vout nominal", unit: "V", def: 5, tip: "Target output voltage. Errors, deviations and tolerance bands are measured against it. Must be below Vin min." },
+  { key: "iout_max", label: "Iout max", unit: "A", def: 2, tip: "Full-load current. Steady state runs at this load; load steps go up to it." },
+  { key: "iout_min", label: "Iout min (blank = 10 % of max)", unit: "A", def: "", optional: true, tip: "Light-load current: the low level of the load step and the start of the load sweep." },
+  { key: "fsw_hz", label: "Switching frequency", unit: "kHz", scale: 1e3, def: 500, tip: "Nominal switching frequency. Sets the simulation time step (100 points per cycle) and the averaging window." },
+  { key: "startup_time_s", label: "Start-up time (blank = auto)", unit: "µs", scale: 1e-6, def: "", optional: true, tip: "Time allowed for soft-start before anything is measured. Auto = max(1 ms, 200 switching cycles). Increase it if Vout has not settled." },
+  { key: "hold_time_s", label: "Hold per level (blank = auto)", unit: "µs", scale: 1e-6, def: "", optional: true, tip: "How long each load/line level is held in transient tests. Auto = max(0.5 ms, 4 measurement windows)." },
+  { key: "measure_cycles", label: "Measurement window", unit: "cycles", def: 50, int: true, tip: "Number of switching cycles averaged for mean Vout, ripple, currents and efficiency." },
+  { key: "load_slew_a_per_us", label: "Load slew rate", unit: "A/µs", def: 1, tip: "How fast the electronic load steps between Iout min and Iout max." },
+  { key: "line_slew_v_per_us", label: "Line slew rate", unit: "V/µs", def: 1, tip: "How fast the input steps between Vin min and Vin max in the line transient." },
+  { key: "settle_band_pct", label: "Settling band", unit: "%", def: 2, tip: "Vout counts as settled once it stays within ± this % of its final value." },
 ];
+
+const TOL_FIELDS = [
+  { key: "vout_pct", label: "Static Vout tolerance", unit: "± %", ph: "e.g. 2", tip: "Allowed DC error of Vout. Checks steady-state error, min/max Vout over the line and load sweeps, and the final value after each step." },
+  { key: "transient_pct", label: "Transient excursion", unit: "± %", ph: "e.g. 5", tip: "Largest Vout overshoot/undershoot allowed during a load or line step, as % of nominal." },
+  { key: "ripple_pct", label: "Max ripple (pk-pk)", unit: "% of Vout", ph: "e.g. 1", tip: "Peak-to-peak output ripple limit as % of nominal Vout, checked at steady state and across both sweeps." },
+  { key: "efficiency_min_pct", label: "Minimum efficiency", unit: "%", ph: "e.g. 85", tip: "Lowest acceptable efficiency, checked at full load and across both sweeps." },
+  { key: "settle_max_us", label: "Max settling time", unit: "µs", ph: "e.g. 200", tip: "Longest allowed recovery time after a load or line step (Vout back inside the settling band)." },
+];
+
+const TEST_TIPS = {
+  steady_state: "Nominal Vin, full load: mean Vout, error, ripple, input/output power and efficiency.",
+  load_transient: "Load steps Iout min → max → min at nominal Vin: peak deviation and settling time.",
+  line_transient: "Input steps Vin min → max → min at full load: peak deviation and settling time.",
+  line_regulation: "Sweeps Vin from min to max at full load (one run per point): Vout change, efficiency, ripple.",
+  load_regulation: "Sweeps the load from Iout min to max at nominal Vin: Vout change, efficiency, ripple.",
+};
+
+const ROLE_TEXT = { vin: "input", sw: "switch node", vout: "output", fb: "feedback", gnd: "ground" };
+
+/* -------------------------------------------------------------- small UI */
+function tip(text) {
+  return h("span", { class: "info", tabindex: "0", "data-tip": text, "aria-label": text });
+}
+
+function fieldLabel(text, tipText, extra) {
+  return h("span", { class: "lbl" }, text, tipText ? tip(tipText) : null, extra || null);
+}
 
 /* --------------------------------------------------------------- navigation */
 function showView(name) {
@@ -145,14 +175,79 @@ function setMsg(el, text, kind) {
 }
 
 /* ------------------------------------------------------------------- setup */
+function buildEngines() {
+  const sel = $("#engine-select");
+  sel.replaceChildren();
+  const engines = state.config.engines || [{ name: state.config.engine.name, label: state.config.engine.name, default: true }];
+  for (const e of engines) {
+    sel.append(h("option", { value: e.name, title: e.version || "" }, e.label + (e.default ? "  (default)" : "")));
+  }
+  const def = engines.find((e) => e.default) || engines[0];
+  sel.value = def.name;
+  updateEngineInfo();
+}
+
+function currentEngine() {
+  return $("#engine-select").value || state.config.engine.name;
+}
+
+function updateEngineInfo() {
+  const e = (state.config.engines || []).find((x) => x.name === currentEngine());
+  $("#run-engine").textContent = e ? `Runs on ${e.label}${e.version ? " — " + e.version.replace(/\*/g, "").trim() : ""}` : "";
+  const eb = $("#engine-badge");
+  const syn = e ? e.synthetic : state.config.engine.synthetic;
+  eb.textContent = `engine: ${currentEngine()}${syn ? " (SYNTHETIC DATA)" : ""}`;
+  eb.classList.toggle("synthetic", !!syn);
+}
+
 function buildDesignFields() {
   const box = $("#design-fields");
   box.replaceChildren();
   for (const f of DESIGN_FIELDS) {
     const input = h("input", { type: "number", step: "any", value: f.def, id: `d-${f.key}` });
     state.inputs[f.key] = input;
-    box.append(h("label", {}, `${f.label} [${f.unit}]`, input));
+    box.append(h("label", {}, fieldLabel(`${f.label} [${f.unit}]`, f.tip), input));
   }
+}
+
+function buildTolerance() {
+  const box = $("#tol-fields");
+  box.replaceChildren();
+  for (const f of TOL_FIELDS) {
+    const input = h("input", { type: "number", step: "any", min: "0", placeholder: f.ph, id: `t-${f.key}` });
+    input.addEventListener("input", renderTolPreview);
+    state.tol[f.key] = input;
+    box.append(h("label", {}, fieldLabel(`${f.label} [${f.unit}]`, f.tip), input));
+  }
+}
+
+function tolerance() {
+  const out = {};
+  for (const f of TOL_FIELDS) {
+    const raw = state.tol[f.key].value.trim();
+    if (raw === "") continue;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0) throw new Error(`${f.label}: enter a positive number`);
+    out[f.key] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function renderTolPreview() {
+  const ul = $("#tol-preview");
+  ul.replaceChildren();
+  let t;
+  try { t = tolerance(); } catch (e) { ul.append(h("li", { class: "fail-text" }, e.message)); return; }
+  if (!t) return;
+  const vout = Number(state.inputs.vout_nom.value) || 0;
+  const tests = new Set(selectedTests());
+  const lines = [];
+  if (t.vout_pct) lines.push(`Vout within ${fmt(vout * (1 - t.vout_pct / 100))} … ${fmt(vout * (1 + t.vout_pct / 100))} V (steady state, sweeps, after each step)`);
+  if (t.transient_pct && (tests.has("load_transient") || tests.has("line_transient"))) lines.push(`Peak deviation during steps ≤ ${fmt(t.transient_pct)} % (${fmt(vout * t.transient_pct / 100)} V)`);
+  if (t.ripple_pct) lines.push(`Ripple ≤ ${fmt(vout * t.ripple_pct * 10)} mV pk-pk`);
+  if (t.efficiency_min_pct) lines.push(`Efficiency ≥ ${fmt(t.efficiency_min_pct)} %`);
+  if (t.settle_max_us && (tests.has("load_transient") || tests.has("line_transient"))) lines.push(`Settling time ≤ ${fmt(t.settle_max_us)} µs`);
+  for (const l of lines) ul.append(h("li", {}, "→ " + l));
 }
 
 function buildTests() {
@@ -162,8 +257,8 @@ function buildTests() {
   for (const t of state.config.tests) {
     const cb = h("input", { type: "checkbox", checked: true });
     state.testBoxes[t.name] = cb;
-    cb.addEventListener("change", refreshLimitMetrics);
-    box.append(h("label", { class: "inline" }, cb, t.label));
+    cb.addEventListener("change", () => { refreshLimitMetrics(); renderTolPreview(); });
+    box.append(h("label", { class: "inline" }, cb, t.label, TEST_TIPS[t.name] ? tip(TEST_TIPS[t.name]) : null));
   }
   refreshLimitMetrics();
 }
@@ -193,7 +288,7 @@ function renderLimits() {
     ul.append(
       h("li", {},
         h("span", {}, `${info ? info.label : lim.key} ${parts.join(" and ")} ${info ? info.unit : ""}`),
-        h("button", { type: "button", onclick: () => { state.limits.splice(i, 1); renderLimits(); } }, "Remove"))
+        h("button", { type: "button", class: "small", onclick: () => { state.limits.splice(i, 1); renderLimits(); } }, "Remove"))
     );
   });
 }
@@ -212,6 +307,14 @@ function addLimit() {
   renderLimits();
 }
 
+function applyVinTolerance() {
+  const pct = Number($("#vin-tol").value);
+  const nom = Number(state.inputs.vin_nom.value);
+  if (!(pct > 0) || !(nom > 0)) { showBanner("Enter Vin nominal and a positive input tolerance first."); return; }
+  state.inputs.vin_min.value = String(Number((nom * (1 - pct / 100)).toPrecision(6)));
+  state.inputs.vin_max.value = String(Number((nom * (1 + pct / 100)).toPrecision(6)));
+}
+
 /* ----------------------------------------------------------------- mapping */
 function currentMode() {
   return $("input[name=mode]:checked").value;
@@ -219,6 +322,10 @@ function currentMode() {
 
 function optionList(items, valueFn, labelFn) {
   return items.map((it) => h("option", { value: valueFn(it) }, labelFn(it)));
+}
+
+function autoTag(key) {
+  return state.autoFilled.has(key) ? h("span", { class: "tag auto", title: "Filled in from the analysis" }, "auto") : null;
 }
 
 function renderMapping() {
@@ -230,18 +337,23 @@ function renderMapping() {
     box.append(h("p", { class: "hint" }, "Upload and analyze your files first."));
     return;
   }
+  const topo = info.topology || { guess: {}, roles: {} };
   if (currentMode() === "circuit") {
-    const src = h("select", {}, optionList(info.voltage_sources, (s) => s.name, (s) => `${s.name}  (${s.nplus} → ${s.nminus})  ${s.value}`));
-    const load = h("select", {}, optionList(info.load_candidates, (s) => s.name, (s) => `${s.name}  (${s.nodes.join(" – ")})  ${s.value}`));
-    const vout = h("input", { type: "text", list: "node-list", value: guessVout(info) });
-    const gnd = h("input", { type: "text", value: "0" });
+    const src = h("select", {}, optionList(info.voltage_sources, (s) => s.name, (s) => `${s.name}   ${s.nplus} → ${s.nminus}   ${s.value}`));
+    const load = h("select", {}, optionList(info.load_candidates, (s) => s.name, (s) => `${s.name}   ${s.nodes.join(" – ")}   ${s.value}`));
+    const vout = h("input", { type: "text", list: "node-list", value: topo.guess.vout_node || guessVout(info) });
+    const gnd = h("input", { type: "text", list: "node-list", value: topo.roles.gnd || "0" });
     const dl = h("datalist", { id: "node-list" }, optionList(info.nodes, (n) => n, (n) => n));
+    state.autoFilled = new Set();
+    if (topo.guess.vin_source) { src.value = topo.guess.vin_source; state.autoFilled.add("src"); }
+    if (topo.guess.load_element) { load.value = topo.guess.load_element; state.autoFilled.add("load"); }
+    if (topo.guess.vout_node) state.autoFilled.add("vout");
     state.map = { src, load, vout, gnd };
     box.append(
-      h("label", {}, "Input voltage source", src),
-      h("label", {}, "Output node", vout, dl),
-      h("label", {}, "Load element (vout → ground)", load),
-      h("label", {}, "Ground node", gnd)
+      h("label", {}, fieldLabel("Input voltage source", "The source element that supplies the converter (e.g. V1). It is replaced by the simulator's own supply, which steps and sweeps Vin.", autoTag("src")), src),
+      h("label", {}, fieldLabel("Output node", "The regulated output net (e.g. out, VOUT). Vout, ripple and output power are measured here.", autoTag("vout")), vout, dl),
+      h("label", {}, fieldLabel("Load element (Vout → ground)", "The resistor or current source that represents the load. It is replaced by an electronic load that the tests control.", autoTag("load")), load),
+      h("label", {}, fieldLabel("Ground node", "Reference node. Almost always 0 (SPICE ground).", null), gnd)
     );
     if (!info.voltage_sources.length) box.append(h("p", { class: "msg err" }, "No top-level voltage source found. Use subcircuit mode, or add the input source (V1 ...) to the netlist."));
     if (!info.load_candidates.length) box.append(h("p", { class: "msg err" }, "No load element (R, I or B) found. Add the load to the netlist or use subcircuit mode."));
@@ -251,25 +363,27 @@ function renderMapping() {
       return;
     }
     const sc = h("select", {}, optionList(info.subckts, (s) => s.name, (s) => `${s.name} (${s.pins.join(" ")})`));
+    const conv = info.subckts.find((s) => s.pins.some((p) => /^(vin|in)$/i.test(p)) && s.pins.some((p) => /^(vout|out)$/i.test(p)));
+    if (conv) sc.value = conv.name;
     state.map.subckt = sc;
     const pins = h("div", { class: "grid" });
-    box.append(h("label", {}, "Subcircuit", sc), pins);
+    box.append(h("label", {}, fieldLabel("Subcircuit", "The .subckt that contains the whole converter (not the controller IC)."), sc), pins);
     const fill = () => {
       const def = info.subckts.find((s) => s.name === sc.value);
       pins.replaceChildren();
       state.map.pins = {};
       const guess = (re, i) => def.pins.find((p) => re.test(p)) || def.pins[i] || "";
       const roles = [
-        ["vin", "VIN pin", guess(/^(vin|in|vcc|vbat)/i, 0)],
-        ["vout", "VOUT pin", guess(/^(vout|out|vo)/i, 1)],
-        ["gnd", "GND pin", guess(/^(gnd|vss|0|agnd|pgnd)/i, 2)],
+        ["vin", "VIN pin", guess(/^(vin|in|vcc|vbat)/i, 0), "Pin that receives the input supply."],
+        ["vout", "VOUT pin", guess(/^(vout|out|vo)/i, 1), "Pin where the regulated output and the load connect."],
+        ["gnd", "GND pin", guess(/^(gnd|vss|0|agnd|pgnd)/i, 2), "Ground / return pin."],
       ];
-      for (const [role, label, pre] of roles) {
+      for (const [role, label, pre, t] of roles) {
         const s = h("select", {}, optionList(def.pins, (p) => p, (p) => p));
         s.value = pre;
         s.addEventListener("change", renderTies);
         state.map.pins[role] = s;
-        pins.append(h("label", {}, label, s));
+        pins.append(h("label", {}, fieldLabel(label, t), s));
       }
       state.map.ties = {};
       state.map.tieBox = h("div", { class: "grid" });
@@ -285,7 +399,7 @@ function renderMapping() {
         if (used.has(p.toLowerCase())) continue;
         const t = h("input", { type: "text", placeholder: "vin | vout | gnd | volts (e.g. 5)", value: "gnd" });
         state.map.ties[p] = t;
-        state.map.tieBox.append(h("label", {}, `Tie pin ${p} to`, t));
+        state.map.tieBox.append(h("label", {}, fieldLabel(`Tie pin ${p} to`, "Extra pins (enable, power-good, sync …) must be tied to vin, vout, gnd or a fixed voltage."), t));
       }
     };
     sc.addEventListener("change", fill);
@@ -310,6 +424,8 @@ function fileForm() {
   if (!nl) throw new Error("Choose a netlist file first.");
   fd.append("netlist", nl, nl.name);
   for (const f of $("#file-models").files) fd.append("models", f, f.name);
+  const bom = $("#file-bom").files[0];
+  if (bom) fd.append("bom", bom, bom.name);
   return fd;
 }
 
@@ -319,17 +435,231 @@ async function doInspect() {
   state.inspected = false;
   $("#btn-run").disabled = true;
   try {
-    state.inspect = await api("/api/inspect", { method: "POST", body: fileForm() });
+    const fd = fileForm();
+    fd.append("engine", currentEngine());
+    if (currentMode() === "subckt" && state.map.subckt) fd.append("subckt", state.map.subckt.value);
+    state.inspect = await api("/api/inspect", { method: "POST", body: fd });
     state.inspected = true;
     const w = state.inspect.warnings.length ? "\nNotes:\n  • " + state.inspect.warnings.join("\n  • ") : "";
     setMsg(msg, `OK: ${state.inspect.statements} statements, ${state.inspect.subckts.length} subcircuit(s), ${state.inspect.voltage_sources.length} source(s).${w}`, "ok");
+    if (state.inspect.topology && state.inspect.topology.scope !== "top" && !state.inspect.voltage_sources.length) {
+      $("input[name=mode][value=subckt]").checked = true;
+    }
     renderMapping();
+    renderAnalysis();
     $("#btn-run").disabled = false;
+    $("#btn-ai").disabled = !state.config.ai_enabled;
   } catch (e) {
     state.inspect = null;
     setMsg(msg, e.message, "err");
+    $("#analysis").classList.add("hidden");
     renderMapping();
   }
+}
+
+/* --------------------------------------------------------------- analysis */
+function renderAnalysis() {
+  const box = $("#analysis");
+  box.replaceChildren();
+  box.classList.remove("hidden");
+  const info = state.inspect;
+  const topo = info.topology;
+  const kindNames = { R: "resistor", C: "capacitor", L: "inductor", V: "source", D: "diode", M: "MOSFET", S: "switch", X: "IC/subcircuit", Q: "BJT", I: "current source", B: "behavioural" };
+  const chips = h("div", { class: "chips" },
+    Object.entries(topo.counts).map(([k, n]) => h("span", { class: "chip" }, `${n} × ${kindNames[k] || k}`)),
+    topo.scope !== "top" ? h("span", { class: "chip" }, `inside .subckt ${topo.scope}`) : null);
+  box.append(h("h3", {}, "What we found"), chips);
+
+  const cols = h("div", { class: "two-col" });
+  box.append(cols);
+  cols.append(h("div", { class: "panel" },
+    h("h4", {}, "Power stage overview", tip("Simplified drawing of the detected buck power stage with your component names. Coloured labels are the nets we identified. It is a guide for checking the mapping, not a full schematic.")),
+    schematicSvg(topo),
+    h("div", { class: "legend" }, ["vin", "sw", "vout", "fb", "gnd"].map((r) => h("span", {}, h("i", { class: r }), `${ROLE_TEXT[r]}: ${topo.roles[r] || "not found"}`)))));
+
+  for (const ic of topo.ics) {
+    cols.append(h("div", { class: "panel" },
+      h("h4", {}, `IC ${ic.name}: ${ic.subckt || "?"} — pins`, tip("Each pin of the controller IC with the net it connects to and the parts on that net. Pin roles come from the net analysis.")),
+      icSvg(ic),
+      ic.defined ? null : h("p", { class: "msg err" }, `Subcircuit ${ic.subckt} is not in the uploaded files: upload its model file.`)));
+  }
+
+  // models
+  const models = topo.models;
+  const mrows = models.vendor.map((m) => h("tr", {},
+    h("td", {}, m.element), h("td", {}, m.kind), h("td", {}, m.model),
+    h("td", { class: `src-${m.source}` }, m.source === "defined" ? "✓ found in your files" : m.source === "missing" ? "✗ missing" : "built-in")));
+  box.append(h("div", { class: "panel" },
+    h("h4", {}, "Models", tip("Model files are needed only for ICs and vendor semiconductors. R, L and C use SPICE's ideal built-in models with the values from the netlist (no ESR/DCR unless the netlist adds them).")),
+    h("p", { class: "hint" }, `${models.passives_builtin} passive part(s) (R, L, C) use SPICE's ideal built-in models — no model file needed.`),
+    mrows.length ? h("table", { class: "data compact" }, h("thead", {}, h("tr", {}, h("th", {}, "Element"), h("th", {}, "Type"), h("th", {}, "Model / subckt"), h("th", {}, "Status"))), h("tbody", {}, mrows)) : h("p", { class: "hint" }, "No vendor models referenced.")));
+
+  if (info.bom) box.append(renderBom(info.bom));
+}
+
+function renderBom(bom) {
+  const panel = h("div", { class: "panel" }, h("h4", {}, `BOM: ${bom.name || ""}`, tip("Reference designators from the BOM are matched with netlist element names; R/L/C values that differ by more than 1 % are flagged.")));
+  if (bom.error) { panel.append(h("p", { class: "msg err" }, bom.error)); return panel; }
+  panel.append(h("div", { class: "chips" },
+    h("span", { class: "chip" }, `${bom.items.length} BOM line(s)`),
+    h("span", { class: "chip" }, `${bom.matched} matched`),
+    h("span", { class: "chip" + (bom.mismatched.length ? " fail-text" : "") }, `${bom.mismatched.length} value mismatch(es)`)));
+  if (bom.mismatched.length) {
+    panel.append(h("table", { class: "data compact" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Ref"), h("th", {}, "BOM value"), h("th", {}, "Netlist value"))),
+      h("tbody", {}, bom.mismatched.map((m) => h("tr", {}, h("td", {}, m.ref), h("td", { class: "fail-text" }, m.bom_value), h("td", {}, m.netlist_value))))));
+  }
+  if (bom.only_in_netlist.length) panel.append(h("p", { class: "hint" }, "In the netlist but not in the BOM: " + bom.only_in_netlist.join(", ")));
+  if (bom.only_in_bom.length) panel.append(h("p", { class: "hint" }, "In the BOM but not in the netlist: " + bom.only_in_bom.join(", ")));
+  panel.append(h("details", {}, h("summary", {}, "Show BOM"),
+    h("table", { class: "data compact" },
+      h("thead", {}, h("tr", {}, ["Ref", "Value", "Tol.", "Part number", "Description"].map((x) => h("th", {}, x)))),
+      h("tbody", {}, bom.items.map((b) => h("tr", {}, h("td", {}, b.ref), h("td", {}, b.value), h("td", {}, b.tolerance), h("td", {}, b.mpn), h("td", {}, b.description)))))));
+  return panel;
+}
+
+function roleCls(role) { return role ? `r-${role}` : ""; }
+
+function schematicSvg(topo) {
+  // Fixed buck layout, labelled with what was detected.
+  const W = 520, H = 230;
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, class: "schem", role: "img", "aria-label": "Detected power stage" });
+  const els = Object.fromEntries(topo.elements.map((e) => [e.name.toLowerCase(), e]));
+  const g = topo.guess, r = topo.roles;
+  const find = (pred) => topo.elements.find(pred);
+  const swEl = find((e) => "SMXQ".includes(e.kind) && e.nodes.includes(r.sw)) || null;
+  const lowEl = find((e) => (e.kind === "D" || e.kind === "M" || e.kind === "S") && e !== swEl && e.nodes.includes(r.sw) && e.nodes.some((n) => n === r.gnd)) || null;
+  const cout = find((e) => e.kind === "C" && e.nodes.includes(r.vout)) || null;
+  const ind = g.inductor ? els[g.inductor.toLowerCase()] : null;
+  const load = g.load_element ? els[g.load_element.toLowerCase()] : null;
+  const src = g.vin_source ? els[g.vin_source.toLowerCase()] : null;
+  const ic = topo.ics[0];
+  const lbl = (e, fallback) => (e ? `${e.name}${e.value ? " " + e.value : ""}` : fallback);
+  const t = (x, y, text, c, anchor) => sv("text", { x, y, class: c || "", "text-anchor": anchor || "middle" }, text);
+  const yT = 60, yG = 190;
+  // wires
+  svg.append(
+    sv("path", { d: `M40 ${yT} H150 M210 ${yT} H260 M330 ${yT} H470 M40 ${yG} H470`, class: "w" }),
+    sv("path", { d: `M40 ${yT} V105 M40 145 V${yG}`, class: "w" }),
+    sv("path", { d: `M235 ${yT} V105 M235 145 V${yG}`, class: "w" }),
+    sv("path", { d: `M390 ${yT} V105 M390 145 V${yG}`, class: "w" }),
+    sv("path", { d: `M470 ${yT} V100 M470 150 V${yG}`, class: "w" })
+  );
+  // source
+  svg.append(sv("circle", { cx: 40, cy: 125, r: 20, class: "box" }), t(40, 121, "+"), t(40, 136, "−"), t(40, 214, lbl(src, "Vin source"), "lbl2"));
+  // high-side switch / IC
+  svg.append(sv("rect", { x: 150, y: yT - 16, width: 60, height: 32, rx: 4, class: "box" }), t(180, yT + 4, swEl ? swEl.name : "switch"));
+  svg.append(t(180, yT - 22, swEl ? (swEl.model || swEl.kind_label) : "high side", "lbl2"));
+  // low-side diode / FET
+  svg.append(sv("rect", { x: 220, y: 105, width: 30, height: 40, rx: 4, class: "box" }), t(235, 129, lowEl ? lowEl.kind : "D"), t(258, 129, lbl(lowEl, "low side"), "lbl2", "start"));
+  // inductor
+  svg.append(sv("path", { d: `M260 ${yT} q8.75 -14 17.5 0 q8.75 -14 17.5 0 q8.75 -14 17.5 0 q8.75 -14 17.5 0`, class: "w" }), t(295, yT - 20, lbl(ind, "L")));
+  // output cap
+  svg.append(sv("path", { d: "M375 105 H405 M375 115 H405", class: "w" }), sv("path", { d: "M390 115 V145", class: "w" }), t(410, 140, lbl(cout, "Cout"), "lbl2", "start"));
+  // load
+  svg.append(sv("rect", { x: 458, y: 100, width: 24, height: 50, class: "box" }), t(470, 168, "load", "lbl2"), t(470, 214, lbl(load, "load"), "lbl2"));
+  // controller / feedback hint
+  if (ic) {
+    const fbPin = ic.pins.find((p) => p.role === "fb");
+    svg.append(sv("path", { d: `M180 ${yT + 16} V96`, class: "w", "stroke-dasharray": "3 3" }));
+    svg.append(sv("rect", { x: 132, y: 96, width: 76, height: 34, rx: 4, class: "box" }));
+    svg.append(t(170, 110, `${ic.name} ${ic.subckt || ""}`), t(170, 124, fbPin ? `FB ← ${fbPin.net}` : "controller", "lbl2"));
+  }
+  // nodes
+  const node = (x, y, name, role) => {
+    if (!name) return;
+    svg.append(sv("circle", { cx: x, cy: y, r: 3.5, class: "dot" }), t(x, y - 9, name, `node ${roleCls(role)}`));
+  };
+  node(40, yT, r.vin, "vin");
+  node(235, yT, r.sw, "sw");
+  node(390, yT, r.vout, "vout");
+  node(255, yG, r.gnd, "gnd");
+  if (r.fb) svg.append(t(470, 30, `feedback: ${r.fb}`, `node ${roleCls("fb")}`, "end"));
+  return svg;
+}
+
+function icSvg(ic) {
+  const n = ic.pins.length;
+  const left = ic.pins.slice(0, Math.ceil(n / 2));
+  const right = ic.pins.slice(Math.ceil(n / 2));
+  const rows = Math.max(left.length, right.length, 1);
+  const W = 520, boxX = 200, boxW = 120, top = 24, pitch = 30, H = top + rows * pitch + 20;
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, class: "schem", role: "img", "aria-label": `Pins of ${ic.name}` });
+  svg.append(sv("rect", { x: boxX, y: top - 8, width: boxW, height: rows * pitch + 4, rx: 5, class: "box" }));
+  svg.append(sv("text", { x: boxX + boxW / 2, y: top - 12, "text-anchor": "middle" }, `${ic.name} · ${ic.subckt || ""}`));
+  const pinRow = (p, i, side) => {
+    const y = top + i * pitch + 10;
+    const x0 = side === "l" ? boxX : boxX + boxW;
+    const x1 = side === "l" ? boxX - 40 : boxX + boxW + 40;
+    svg.append(sv("line", { x1: x0, y1: y, x2: x1, y2: y, class: `w ${p.role ? "s-" + p.role : ""}` }));
+    svg.append(sv("text", { x: side === "l" ? boxX + 6 : boxX + boxW - 6, y: y + 4, "text-anchor": side === "l" ? "start" : "end" }, p.pin));
+    const tx = side === "l" ? x1 - 6 : x1 + 6;
+    const anchor = side === "l" ? "end" : "start";
+    svg.append(sv("text", { x: tx, y: y - 1, "text-anchor": anchor, class: `node ${roleCls(p.role)}` }, p.net + (p.role ? ` (${ROLE_TEXT[p.role]})` : "")));
+    if (p.attached.length) svg.append(sv("text", { x: tx, y: y + 11, "text-anchor": anchor, class: "lbl2" }, p.attached.join(", ")));
+  };
+  left.forEach((p, i) => pinRow(p, i, "l"));
+  right.forEach((p, i) => pinRow(p, i, "r"));
+  return svg;
+}
+
+/* --------------------------------------------------------------------- AI */
+async function doExplain() {
+  const panel = $("#ai-panel");
+  panel.classList.remove("hidden");
+  panel.replaceChildren(h("div", { class: "msg" }, "Asking Claude about this circuit… (this can take up to a minute)"));
+  $("#btn-ai").disabled = true;
+  try {
+    const fd = fileForm();
+    fd.append("engine", currentEngine());
+    state.ai = await api("/api/ai/explain", { method: "POST", body: fd });
+    renderAi(state.ai);
+  } catch (e) {
+    panel.replaceChildren(h("div", { class: "msg err" }, e.message));
+  } finally {
+    $("#btn-ai").disabled = !state.config.ai_enabled;
+  }
+}
+
+function renderAi(a) {
+  const panel = $("#ai-panel");
+  panel.replaceChildren();
+  const box = h("div", { class: "panel ai-box" }, h("h4", {}, "AI explanation", h("span", { class: "tag ai" }, a.model || "Claude"),
+    tip("Generated by an AI model from your netlist and BOM. Treat it as a second opinion and check it against the datasheet.")));
+  box.append(h("p", {}, a.summary), h("p", { class: "hint" }, a.topology));
+  if (a.controller && a.controller.element) box.append(h("p", {}, h("b", {}, `Controller ${a.controller.element} (${a.controller.model}): `), a.controller.description));
+  if (a.pins && a.pins.length) {
+    box.append(h("table", { class: "data compact" },
+      h("thead", {}, h("tr", {}, h("th", {}, "Pin"), h("th", {}, "Net"), h("th", {}, "Function"))),
+      h("tbody", {}, a.pins.map((p) => h("tr", {}, h("td", {}, p.pin), h("td", {}, p.net), h("td", {}, p.function))))));
+  }
+  const m = a.suggested_mapping || {};
+  const d = a.design_estimates || {};
+  box.append(h("dl", { class: "kv2" },
+    h("dt", {}, "Suggested mapping"), h("dd", {}, `source ${m.vin_source || "?"}, output ${m.vout_node || "?"}, load ${m.load_element || "?"}, ground ${m.gnd_node || "?"}`),
+    h("dt", {}, "Estimated design"), h("dd", {}, [d.vin_nom_v != null ? `Vin ${fmt(d.vin_nom_v)} V` : null, d.vout_nom_v != null ? `Vout ${fmt(d.vout_nom_v)} V` : null, d.iout_max_a != null ? `Iout ${fmt(d.iout_max_a)} A` : null, d.fsw_khz != null ? `fsw ${fmt(d.fsw_khz)} kHz` : null].filter(Boolean).join(", ") || "—")));
+  if (a.issues && a.issues.length) box.append(h("h4", {}, "Points to check"), h("ul", { class: "warnlist" }, a.issues.map((x) => h("li", {}, x))));
+  box.append(h("div", { class: "row" }, h("button", { type: "button", onclick: applyAiSuggestion }, "Apply suggested mapping and values")));
+  panel.append(box);
+}
+
+function applyAiSuggestion() {
+  const a = state.ai;
+  if (!a) return;
+  const m = a.suggested_mapping || {};
+  if (currentMode() === "circuit" && state.map.src) {
+    const has = (sel, v) => [...sel.options].some((o) => o.value === v);
+    if (m.vin_source && has(state.map.src, m.vin_source)) state.map.src.value = m.vin_source;
+    if (m.load_element && has(state.map.load, m.load_element)) state.map.load.value = m.load_element;
+    if (m.vout_node) state.map.vout.value = m.vout_node;
+    if (m.gnd_node) state.map.gnd.value = m.gnd_node;
+  }
+  const d = a.design_estimates || {};
+  if (d.vin_nom_v) state.inputs.vin_nom.value = String(d.vin_nom_v);
+  if (d.vout_nom_v) state.inputs.vout_nom.value = String(d.vout_nom_v);
+  if (d.iout_max_a) state.inputs.iout_max.value = String(d.iout_max_a);
+  if (d.fsw_khz) state.inputs.fsw_hz.value = String(d.fsw_khz);
+  showBanner("Applied the AI suggestion. Please review sections 2 and 3.", true);
 }
 
 /* --------------------------------------------------------------- build spec */
@@ -350,8 +680,18 @@ function buildSpec() {
     const v = num(raw, f.label);
     design[f.key] = f.int ? Math.round(v) : Number((v * (f.scale || 1)).toPrecision(12));
   }
-  const spec = { name: $("#job-name").value.trim(), mode: currentMode(), design, tests: selectedTests(), limits: {} };
+  const spec = {
+    name: $("#job-name").value.trim(),
+    engine: currentEngine(),
+    mode: currentMode(),
+    design,
+    tests: selectedTests(),
+    limits: {},
+    notes: $("#job-notes").value.trim(),
+  };
   if (!spec.tests.length) throw new Error("Select at least one test.");
+  const tol = tolerance();
+  if (tol) spec.tolerance = tol;
   for (const l of state.limits) {
     const o = {};
     if (l.min !== null) o.min = l.min;
@@ -395,22 +735,22 @@ async function runJob() {
 
 /* -------------------------------------------------------------------- demo */
 async function loadExample() {
-  const msg = $("#run-msg");
+  const msg = $("#inspect-msg");
   try {
     setMsg(msg, "Loading demo files…");
-    const names = ["buck_demo.cir", "toyctrl.lib"];
-    const dtN = new DataTransfer();
-    const dtM = new DataTransfer();
-    for (const n of names) {
-      const blob = await api(`/api/examples/${n}`, { as: "blob" });
-      (n.endsWith(".cir") ? dtN : dtM).items.add(new File([blob], n));
-    }
-    $("#file-netlist").files = dtN.files;
-    $("#file-models").files = dtM.files;
+    const put = async (sel, names) => {
+      const dt = new DataTransfer();
+      for (const n of names) dt.items.add(new File([await api(`/api/examples/${n}`, { as: "blob" })], n));
+      $(sel).files = dt.files;
+    };
+    await put("#file-netlist", ["buck_demo.cir"]);
+    await put("#file-models", ["toyctrl.lib"]);
+    await put("#file-bom", ["buck_demo_bom.csv"]);
     const spec = await api("/api/examples/buck_demo.spec.json");
+    $("input[name=mode][value=circuit]").checked = true;
     await doInspect();
     applySpec(spec);
-    setMsg(msg, "Demo loaded. Review the settings and press Run.", "ok");
+    setMsg($("#run-msg"), "Demo loaded. Review the settings and press Run.", "ok");
   } catch (e) {
     setMsg(msg, e.message, "err");
   }
@@ -423,10 +763,20 @@ function applySpec(spec) {
     state.inputs[f.key].value = v === undefined ? String(f.def) : String(Number((v / (f.scale || 1)).toPrecision(10)));
   }
   $("#job-name").value = spec.name || "";
+  $("#job-notes").value = spec.notes || "";
   for (const [n, cb] of Object.entries(state.testBoxes)) cb.checked = (spec.tests || []).includes(n);
   refreshLimitMetrics();
+  for (const f of TOL_FIELDS) {
+    const v = spec.tolerance ? spec.tolerance[f.key] : undefined;
+    state.tol[f.key].value = v === undefined || v === null ? "" : String(v);
+  }
+  renderTolPreview();
   state.limits = Object.entries(spec.limits || {}).map(([key, l]) => ({ key, min: l.min ?? null, max: l.max ?? null }));
   renderLimits();
+  if (spec.engine && [...$("#engine-select").options].some((o) => o.value === spec.engine)) {
+    $("#engine-select").value = spec.engine;
+    updateEngineInfo();
+  }
   const radio = document.querySelector(`input[name=mode][value=${spec.mode}]`);
   if (radio) radio.checked = true;
   renderMapping();
@@ -449,10 +799,11 @@ async function refreshJobs() {
       tb.append(
         h("tr", { class: "clickable", onclick: () => openJob(j.id) },
           h("td", {}, j.name || j.id.slice(0, 8)),
+          h("td", {}, j.engine || ""),
           h("td", {}, h("span", { class: `pill ${cls(j.status)}` }, j.status)),
           h("td", {}, verdict ? h("span", { class: `pill ${cls(verdict)}` }, verdict) : ""),
           h("td", {}, fmtTime(j.created_at)),
-          h("td", {}, h("button", { type: "button", onclick: (ev) => { ev.stopPropagation(); removeJob(j); } }, j.status === "queued" || j.status === "running" ? "Cancel" : "Delete")))
+          h("td", {}, h("button", { type: "button", class: "small", onclick: (ev) => { ev.stopPropagation(); removeJob(j); } }, j.status === "queued" || j.status === "running" ? "Cancel" : "Delete")))
       );
     }
   } catch (e) {
@@ -496,6 +847,25 @@ function openJob(id) {
 }
 
 /* ------------------------------------------------------------------ render */
+function reportButton(job, kind, label) {
+  const stem = (job.name || "buck-sim").replace(/[^A-Za-z0-9_-]+/g, "_").slice(0, 40);
+  const btn = h("button", { type: "button" }, label);
+  btn.addEventListener("click", async () => {
+    btn.disabled = true;
+    const old = btn.textContent;
+    btn.textContent = "Preparing…";
+    try {
+      await download(`/api/jobs/${job.id}/report.${kind}`, `${stem}-${job.id.slice(0, 8)}.${kind}`);
+    } catch (e) {
+      showBanner(e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = old;
+    }
+  });
+  return btn;
+}
+
 function renderJob(job) {
   const root = $("#job-detail");
   root.replaceChildren();
@@ -525,11 +895,20 @@ function renderJob(job) {
       h("span", {}, "Run time: ", h("b", {}, `${fmt(res.duration_s)} s`))
     ),
     h("div", { class: "row" },
+      reportButton(job, "pdf", "Download PDF report"),
+      reportButton(job, "docx", "Download Word report"),
       h("button", { type: "button", onclick: () => download(`/api/jobs/${job.id}/report.csv`, `buck-sim-${job.id.slice(0, 8)}.csv`).catch((e) => showBanner(e.message)) }, "Download CSV"),
-      h("button", { type: "button", onclick: () => showLog(job.id) }, "Show log")
+      h("button", { type: "button", onclick: () => showLog(job.id) }, "Show log"),
+      tip("The PDF and Word reports contain the job settings, tolerance, every metric with its limit and result, all charts and the BOM (if one was uploaded).")
     ),
     h("div", { id: "log-box" })
   );
+  if (job.spec && job.spec.tolerance) {
+    const t = job.spec.tolerance;
+    const parts = TOL_FIELDS.filter((f) => t[f.key] != null).map((f) => `${f.label} ${fmt(t[f.key])} ${f.unit}`);
+    if (parts.length) head.append(h("p", { class: "hint" }, "Tolerance: " + parts.join(" · ")));
+  }
+  if (job.spec && job.spec.notes) head.append(h("p", { class: "hint" }, "Notes: " + job.spec.notes));
   if (res.warnings.length) head.append(h("ul", { class: "warnlist" }, res.warnings.map((w) => h("li", {}, w))));
   for (const t of res.tests) root.append(renderTest(job, res, t));
 }
@@ -727,14 +1106,21 @@ async function init() {
   $("#nav-new").addEventListener("click", () => showView("new"));
   $("#nav-jobs").addEventListener("click", () => showView("jobs"));
   $("#btn-inspect").addEventListener("click", doInspect);
+  $("#btn-ai").addEventListener("click", doExplain);
   $("#btn-add-limit").addEventListener("click", addLimit);
   $("#btn-run").addEventListener("click", runJob);
   $("#btn-example").addEventListener("click", loadExample);
+  $("#btn-vin-tol").addEventListener("click", applyVinTolerance);
+  $("#engine-select").addEventListener("change", () => {
+    updateEngineInfo();
+    if (state.inspected) doInspect(); // model availability depends on the engine
+  });
   for (const r of document.querySelectorAll("input[name=mode]")) r.addEventListener("change", renderMapping);
-  for (const id of ["#file-netlist", "#file-models"]) {
-    $(id).addEventListener("change", () => { state.inspected = false; $("#btn-run").disabled = true; });
+  for (const id of ["#file-netlist", "#file-models", "#file-bom"]) {
+    $(id).addEventListener("change", () => { state.inspected = false; $("#btn-run").disabled = true; $("#btn-ai").disabled = true; });
   }
   buildDesignFields();
+  buildTolerance();
   renderMapping();
   try {
     state.config = await api("/api/config");
@@ -742,10 +1128,13 @@ async function init() {
     showBanner("Cannot reach the server: " + e.message);
     return;
   }
-  const eb = $("#engine-badge");
-  eb.textContent = `engine: ${state.config.engine.name}${state.config.engine.synthetic ? " (SYNTHETIC DATA)" : ""}`;
-  if (state.config.engine.synthetic) eb.classList.add("synthetic");
+  buildEngines();
   buildTests();
+  state.inputs.vout_nom.addEventListener("input", renderTolPreview);
+  const aiBtn = $("#btn-ai");
+  aiBtn.title = state.config.ai_enabled
+    ? "Send the netlist and BOM to Claude for an explanation and a suggested mapping"
+    : "AI help is off: start the server with ANTHROPIC_API_KEY set to enable it";
 }
 
 document.addEventListener("DOMContentLoaded", init);

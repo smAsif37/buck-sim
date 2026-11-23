@@ -1,0 +1,11 @@
+Designator,Qty,Value,Tolerance,Description,Manufacturer,Manufacturer Part Number,Package
+L1,1,10uH,20%,"Shielded power inductor, 4.5 A",Generic,IND-10U-4A5,5x5mm
+Cout,1,47uF,10%,"Ceramic X7R 16 V",Generic,CAP-47U-16V,1210
+D1,1,,,"Schottky diode 40 V 3 A",Generic,SS34,SMA
+Rtop Rbot,2,10k,1%,"Thick film resistor",Generic,RES-10K-1%,0603
+Rlead,1,412,1%,"Thick film resistor",Generic,RES-412-1%,0603
+Clead,1,2.7nF,5%,"C0G capacitor",Generic,CAP-2N7,0603
+Rz,1,2.7k,1%,"Thick film resistor",Generic,RES-2K7-1%,0603
+Cz,1,10nF,10%,"X7R capacitor",Generic,CAP-10N,0603
+Cp,1,68pF,5%,"C0G capacitor",Generic,CAP-68P,0603
+X1,1,TOYCTRL,,"Voltage-mode PWM controller (demo model)",Demo,TOYCTRL,SOT-23-6

@@ -18,7 +18,7 @@ RUN useradd --create-home --uid 10001 app \
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install .
+RUN pip install ".[ai]"
 
 USER app
 ENV DATA_DIR=/data \

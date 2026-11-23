@@ -20,36 +20,99 @@
 
   <main>
     <section id="view-new">
+      <!-- 1. Upload -------------------------------------------------------- -->
       <div class="card">
-        <h2>1. Upload</h2>
-        <p class="hint">Upload a SPICE netlist (<code>.cir</code>, <code>.net</code>, <code>.sp</code>) of your buck converter
-          and any IC model files it includes. LTspice schematics (<code>.asc</code>): use <em>View &rarr; SPICE Netlist</em> first.</p>
+        <div class="card-head">
+          <h2><span class="step">1</span> Upload files</h2>
+          <label class="inline engine-pick">Simulator
+            <select id="engine-select"></select>
+            <span class="info" tabindex="0" data-tip="SPICE engine used for this job. ngspice is free and the default. LTspice is offered when it is installed on the server; it also knows the LTspice built-in libraries (ltc.lib, standard.dio …)."></span>
+          </label>
+        </div>
+        <p class="hint">LTspice schematics (<code>.asc</code>): export a netlist first with <em>View &rarr; SPICE Netlist</em>.</p>
+        <div class="slots">
+          <div class="slot">
+            <div class="slot-title"><span class="ico ico-net"></span> Netlist <span class="req">required</span></div>
+            <input id="file-netlist" type="file" accept=".cir,.net,.sp,.spi,.ckt,.txt">
+            <p class="slot-hint">The complete buck converter (<code>.cir</code>, <code>.net</code>, <code>.sp</code>).</p>
+          </div>
+          <div class="slot">
+            <div class="slot-title"><span class="ico ico-chip"></span> IC model files <span class="opt">optional</span></div>
+            <input id="file-models" type="file" multiple accept=".lib,.sub,.mod,.model,.mdl,.inc,.cir,.sp,.spi,.ckt,.txt">
+            <p class="slot-hint"><b>Only for the controller IC</b> and vendor semiconductors (MOSFET, diode) that the netlist
+              <code>.include</code>s. Resistors, capacitors and inductors need no model: SPICE simulates them as ideal
+              parts from the values in the netlist.</p>
+          </div>
+          <div class="slot">
+            <div class="slot-title"><span class="ico ico-bom"></span> BOM <span class="opt">optional</span></div>
+            <input id="file-bom" type="file" accept=".csv,.tsv,.txt">
+            <p class="slot-hint">Bill of materials as CSV (export from Excel/KiCad/Altium). Reference only: compared with
+              the netlist values and added to the report. It does not change the simulation.</p>
+          </div>
+        </div>
         <div class="row">
-          <label>Netlist <input id="file-netlist" type="file"></label>
-          <label>Model files (optional) <input id="file-models" type="file" multiple></label>
-          <button id="btn-inspect" type="button">Analyze files</button>
+          <button id="btn-inspect" type="button" class="primary">Analyze files</button>
+          <button id="btn-ai" type="button" disabled>Explain with AI</button>
+          <button id="btn-example" type="button">Load demo example</button>
+          <span class="info" tabindex="0" data-tip="Analyze reads the files, detects the input, switch node, output, feedback and IC pins, and draws an overview. Explain with AI sends the netlist and BOM to Claude for a written explanation and a suggested mapping (only when the server has an API key)."></span>
         </div>
         <div id="inspect-msg" class="msg"></div>
+        <div id="analysis" class="hidden"></div>
+        <div id="ai-panel" class="hidden"></div>
       </div>
 
+      <!-- 2. Mapping -------------------------------------------------------- -->
       <div class="card" id="card-setup">
-        <h2>2. Circuit mapping</h2>
-        <div class="row">
-          <label><input type="radio" name="mode" value="circuit" checked> Complete circuit (source and load included)</label>
-          <label><input type="radio" name="mode" value="subckt"> Subcircuit (<code>.subckt</code> with VIN / VOUT / GND pins)</label>
+        <h2><span class="step">2</span> Circuit mapping</h2>
+        <p class="hint">Tell the simulator where to connect its own input supply and electronic load. Fields marked
+          <span class="tag auto">auto</span> were filled in from the analysis; check them.</p>
+        <div class="modes">
+          <label class="mode-card">
+            <input type="radio" name="mode" value="circuit" checked>
+            <svg viewBox="0 0 120 54" class="mode-ico" aria-hidden="true">
+              <circle cx="14" cy="27" r="9" class="ln"/><path d="M14 22v10M9 27h10" class="ln"/>
+              <path d="M23 27h17M80 27h17" class="ln"/><rect x="40" y="14" width="40" height="26" rx="3" class="ln fillsoft"/>
+              <text x="60" y="31" class="tx">buck</text>
+              <rect x="97" y="17" width="12" height="20" class="ln"/><path d="M100 22l6 4-6 4 6 4" class="ln"/>
+            </svg>
+            <span class="mode-text"><b>Complete circuit</b><br><small>The netlist contains the input source and the load.
+              The simulator swaps them for its own stimulus.</small></span>
+          </label>
+          <label class="mode-card">
+            <input type="radio" name="mode" value="subckt">
+            <svg viewBox="0 0 120 54" class="mode-ico" aria-hidden="true">
+              <rect x="38" y="8" width="44" height="38" rx="3" class="ln fillsoft"/><text x="60" y="31" class="tx">.subckt</text>
+              <path d="M18 18h20M18 36h20M82 18h20M82 36h20" class="ln"/>
+              <text x="6" y="21" class="tx sm">VIN</text><text x="6" y="39" class="tx sm">GND</text><text x="104" y="21" class="tx sm">VOUT</text>
+            </svg>
+            <span class="mode-text"><b>Subcircuit</b><br><small>The netlist defines a <code>.subckt</code> with VIN / VOUT / GND
+              pins. The simulator builds the source and load around it.</small></span>
+          </label>
         </div>
         <div id="mapping" class="grid"></div>
       </div>
 
+      <!-- 3. Operating range ------------------------------------------------ -->
       <div class="card">
-        <h2>3. Operating range</h2>
+        <h2><span class="step">3</span> Operating range</h2>
+        <div class="row">
+          <label>Input tolerance [± %]
+            <span class="field"><input id="vin-tol" type="number" step="any" min="0" placeholder="e.g. 25">
+              <button id="btn-vin-tol" type="button" class="small">Set Vin min/max</button></span>
+          </label>
+          <span class="info" tabindex="0" data-tip="Shortcut: fills Vin min and Vin max as Vin nominal ± this percentage."></span>
+        </div>
         <div id="design-fields" class="grid"></div>
       </div>
 
+      <!-- 4. Tests & acceptance --------------------------------------------- -->
       <div class="card">
-        <h2>4. Tests and pass/fail limits</h2>
+        <h2><span class="step">4</span> Tests and acceptance criteria</h2>
         <div id="tests" class="row wrap"></div>
-        <h3>Limits (optional)</h3>
+        <h3>Overall tolerance <span class="info" tabindex="0" data-tip="Each value you enter becomes pass/fail limits for every selected test it applies to. Leave a field blank to skip it. Limits you add below override these."></span></h3>
+        <div id="tol-fields" class="grid"></div>
+        <ul id="tol-preview" class="plain small-list"></ul>
+        <h3>Extra limits (optional) <span class="info" tabindex="0" data-tip="Add a min and/or max for any single metric. These take priority over the overall tolerance."></span></h3>
         <div class="row wrap">
           <label>Metric <select id="limit-metric"></select></label>
           <label>Min <input id="limit-min" type="number" step="any"></label>
@@ -59,12 +122,16 @@
         <ul id="limit-list" class="plain"></ul>
       </div>
 
+      <!-- 5. Run ------------------------------------------------------------ -->
       <div class="card">
-        <h2>5. Run</h2>
-        <label>Job name <input id="job-name" type="text" maxlength="80" placeholder="optional"></label>
+        <h2><span class="step">5</span> Run</h2>
+        <div class="grid">
+          <label>Job name <input id="job-name" type="text" maxlength="80" placeholder="optional"></label>
+        </div>
+        <label>Notes for the report <textarea id="job-notes" rows="2" maxlength="2000" placeholder="optional: board revision, purpose, assumptions …"></textarea></label>
         <div class="row">
           <button id="btn-run" type="button" class="primary" disabled>Run simulations</button>
-          <button id="btn-example" type="button">Load demo example</button>
+          <span id="run-engine" class="hint"></span>
         </div>
         <div id="run-msg" class="msg"></div>
       </div>
@@ -74,7 +141,7 @@
       <div class="card">
         <h2>Jobs</h2>
         <table id="jobs-table" class="data">
-          <thead><tr><th>Name</th><th>Status</th><th>Result</th><th>Created</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Engine</th><th>Status</th><th>Result</th><th>Created</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>

@@ -12,8 +12,8 @@ from buck_sim.worker import Worker
 
 
 class LiveServer:
-    def __init__(self, settings):
-        self.app = create_app(settings)
+    def __init__(self, settings, ai_client=None):
+        self.app = create_app(settings, ai_client=ai_client)
         config = uvicorn.Config(self.app, host="127.0.0.1", port=0, log_level="warning", lifespan="off")
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(target=self.server.run, daemon=True)

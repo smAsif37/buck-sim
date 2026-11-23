@@ -11,6 +11,7 @@ import traceback
 from pathlib import Path
 
 from .config import Settings
+from .engines import EngineRegistry
 from .engines.base import Engine
 from .runner import JobCancelled, JobInputError, RunContext, run_job
 from .spec import JobSpec
@@ -35,10 +36,18 @@ def prune_work_dir(job_dir: Path) -> None:
 
 
 class Worker:
-    def __init__(self, settings: Settings, store: JobStore, engine: Engine, worker_id: str | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        store: JobStore,
+        engine: Engine | EngineRegistry,
+        worker_id: str | None = None,
+    ):
         self.settings = settings
         self.store = store
-        self.engine = engine
+        # A single Engine (tests) or a registry so each job can use the engine it asked for.
+        self.engines = engine if isinstance(engine, EngineRegistry) else EngineRegistry(settings, engine)
+        self.engine = self.engines.get()
         self.worker_id = worker_id or f"{socket.gethostname()}-{os.getpid()}"
         self.stop_event = threading.Event()
         self._last_recover = 0.0
@@ -48,7 +57,7 @@ class Worker:
         self.stop_event.set()
 
     def run_forever(self) -> None:
-        log.info("worker %s started (engine=%s)", self.worker_id, self.engine.name)
+        log.info("worker %s started (engines=%s, default=%s)", self.worker_id, ",".join(self.engines.names()), self.engines.default)
         while not self.stop_event.is_set():
             try:
                 did = self.run_once()
@@ -100,8 +109,12 @@ class Worker:
 
         try:
             spec = JobSpec.model_validate(job["spec"])
+            try:
+                engine = self.engines.get(job.get("engine") or spec.engine)
+            except ValueError as e:
+                raise JobInputError(f"{e}. Choose another engine.") from e
             files = self.store.read_inputs(job_id, job["files"]["all"])
-            ctx = RunContext(self.engine, self.settings, progress, cancelled)
+            ctx = RunContext(engine, self.settings, progress, cancelled)
             results = run_job(job_dir, spec, files, job["files"]["netlist"], ctx)
             self.store.finish(job_id, SUCCEEDED, summary=results["summary"])
             log.info("job %s finished: %s", job_id, results["summary"]["verdict"])

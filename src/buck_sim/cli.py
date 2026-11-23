@@ -13,7 +13,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import Settings
-from .engines import create_engine
+from .engines import EngineRegistry, create_engine
 from .runner import JobInputError, RunContext, run_job
 from .spec import JobSpec
 from .store import JobStore
@@ -68,7 +68,7 @@ def cmd_worker(_: argparse.Namespace) -> int:
     settings = Settings.from_env()
     setup_logging(settings)
     store = JobStore(settings.data_dir)
-    worker = Worker(settings, store, create_engine(settings))
+    worker = Worker(settings, store, EngineRegistry(settings))
 
     def handle(_sig: int, _frame: object) -> None:
         logging.getLogger(__name__).info("shutdown requested")

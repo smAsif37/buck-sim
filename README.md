@@ -3,9 +3,14 @@
 Web app that runs a standard test suite on a buck-converter SPICE netlist and shows the results in the browser.
 
 - **Tests:** steady state (Vout, ripple, efficiency), load transient, line transient, line regulation, load regulation.
-- **Engines:** ngspice (free, default) or LTspice; a labelled synthetic mock engine for demos.
-- **Input:** SPICE netlist plus optional IC model files. Pass/fail limits per metric.
-- **Output:** metric cards, waveforms with zoom, CSV report.
+- **Engines:** ngspice (free, default) or LTspice, chosen per job in the UI; a labelled synthetic mock engine for demos.
+- **Input:** SPICE netlist, optional IC model files (passives need none) and an optional BOM (CSV) for reference.
+- **Analysis:** on upload the app detects input, switch node, output, feedback and IC pins, draws a power-stage
+  overview and the IC pinout, checks which models are present and compares the BOM with the netlist.
+  Optional "Explain with AI" (Claude) gives a written explanation and a suggested mapping.
+- **Acceptance:** overall tolerance (Vout band, transient excursion, ripple, efficiency, settling) turned into
+  pass/fail limits automatically, plus per-metric limits. Every input has a hover help text.
+- **Output:** metric tables, waveforms with zoom, and downloadable **PDF**, **Word (.docx)** and CSV reports.
 
 > **Start here: [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md)** – the step-by-step guide.
 
@@ -31,8 +36,11 @@ Mock results are synthetic. For real results install ngspice (or LTspice) as des
 
 ## Status
 
-Verified by automated tests: parsing, test-bench generation, metrics, queue/worker, API (using the mock engine).
-**Not yet verified:** real LTspice/ngspice runs, Docker builds, GitHub Actions, the UI in a browser.
+Verified by automated tests: parsing, test-bench generation, metrics, queue/worker, API, topology detection,
+BOM parsing, tolerance limits, PDF/Word reports and the AI endpoint (with a stand-in client).
+Verified on real simulators: ngspice 39/45/47 (Windows, Linux CI, Docker) and LTspice 24 on Windows; both agree on
+the demo converter within a few percent. The AI explanation needs your own Anthropic API key and has not been
+exercised against the live API in CI.
 Run the self-test and CI to check these on your side.
 
 ## Licensing

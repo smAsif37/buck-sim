@@ -132,11 +132,19 @@ check the path/arguments. On Linux/Wine, the first run can take much longer whil
 Read `docs/NETLIST_GUIDE.md` first. In short:
 
 1. Export a **netlist** from LTspice (*View → SPICE Netlist*) or your tool. `.asc` schematics are not accepted.
-2. Upload it plus any IC model files (`.lib`, `.sub`, `.cir`, `.mod`, `.sp`).
-3. Press **Inspect**, then map: input source, output node, load element (circuit mode) or the pins (sub-circuit mode).
-4. Enter the design values: Vin range, Vout, load range, switching frequency.
-5. Choose tests, optionally set limits, and Run.
-6. **Validate** one result against your own LTspice/ngspice run of the same circuit before relying on it
+2. Upload it plus the IC model files it includes (`.lib`, `.sub`, `.cir`, `.mod`, `.sp`). Model files are only
+   needed for the controller IC and vendor semiconductors; resistors, capacitors and inductors use SPICE's ideal
+   built-in models. Optionally add the **BOM as CSV** (reference only: compared with the netlist, put in the report).
+3. Pick the **simulator** (ngspice is the default; LTspice appears when it is installed) and press **Analyze files**.
+   Check the power-stage overview, the IC pinout and the model list. With an Anthropic API key on the server,
+   **Explain with AI** adds a written explanation and a suggested mapping.
+4. Check the mapping (fields marked *auto* were filled in from the analysis): input source, output node, load element
+   (circuit mode) or the pins (sub-circuit mode).
+5. Enter the design values: Vin range (or Vin nominal ± a tolerance), Vout, load range, switching frequency.
+   Hover the (i) icons for what each field does.
+6. Choose tests, set the **overall tolerance** (Vout band, transient excursion, ripple, efficiency, settling time)
+   and/or extra per-metric limits, and Run. Download the results as **PDF**, **Word** or CSV.
+7. **Validate** one result against your own LTspice/ngspice run of the same circuit before relying on it
    (compare ripple, Vout, efficiency within a few percent).
 
 Encrypted vendor models (PSpice `.olb`, encrypted `.lib`) cannot be used by ngspice. Use the vendor's unencrypted

@@ -37,7 +37,7 @@ class NgspiceEngine(Engine):
         if self._version is None:
             try:
                 _, out = run_process([*self.cmd, "--version"], cwd=Path.cwd(), timeout_s=15)
-                first = next((ln.strip() for ln in out.splitlines() if "ngspice" in ln.lower()), "")
+                first = next((ln.strip(" *\t") for ln in out.splitlines() if "ngspice" in ln.lower()), "")
                 self._version = first or "ngspice"
             except EngineError:
                 self._version = "ngspice (version unknown)"

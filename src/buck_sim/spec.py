@@ -170,16 +170,94 @@ class Limit(BaseModel):
         return self
 
 
+class Tolerance(BaseModel):
+    """Overall acceptance criteria. Each value set here is turned into pass/fail limits
+    for the selected tests (an explicit entry in ``limits`` always wins)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vout_pct: float | None = Field(
+        default=None, gt=0, le=50, description="Static Vout band: +/- % of nominal (steady state, sweeps)"
+    )
+    transient_pct: float | None = Field(
+        default=None, gt=0, le=100, description="Allowed Vout excursion during load/line steps: +/- % of nominal"
+    )
+    ripple_pct: float | None = Field(
+        default=None, gt=0, le=100, description="Max peak-to-peak ripple as % of nominal Vout"
+    )
+    efficiency_min_pct: float | None = Field(default=None, gt=0, le=100, description="Minimum efficiency (%)")
+    settle_max_us: float | None = Field(default=None, gt=0, le=1e6, description="Max settling time after a step (us)")
+
+    def derived_limits(self, vout_nom: float, tests: list[str]) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        sel = set(tests)
+
+        def put(key: str, lo: float | None = None, hi: float | None = None) -> None:
+            if key.split(".")[0] not in sel:
+                return
+            d: dict[str, float] = {}
+            if lo is not None:
+                d["min"] = round(lo, 9)
+            if hi is not None:
+                d["max"] = round(hi, 9)
+            out[key] = d
+
+        if self.vout_pct is not None:
+            t = self.vout_pct
+            lo, hi = vout_nom * (1 - t / 100), vout_nom * (1 + t / 100)
+            put("steady_state.vout_error_pct", -t, t)
+            for test in ("line_regulation", "load_regulation"):
+                put(f"{test}.vout_min_v", lo, None)
+                put(f"{test}.vout_max_v", None, hi)
+            for test in ("load_transient", "line_transient"):
+                put(f"{test}.up_final_v", lo, hi)
+                put(f"{test}.down_final_v", lo, hi)
+        if self.transient_pct is not None:
+            t = self.transient_pct
+            for test in ("load_transient", "line_transient"):
+                put(f"{test}.up_dev_pct", None, t)
+                put(f"{test}.down_dev_pct", None, t)
+        if self.ripple_pct is not None:
+            r = vout_nom * self.ripple_pct / 100
+            put("steady_state.ripple_pp_v", None, r)
+            put("line_regulation.ripple_max_pp_v", None, r)
+            put("load_regulation.ripple_max_pp_v", None, r)
+        if self.efficiency_min_pct is not None:
+            e = self.efficiency_min_pct
+            put("steady_state.efficiency_pct", e, None)
+            put("line_regulation.efficiency_min_pct", e, None)
+            put("load_regulation.efficiency_min_pct", e, None)
+        if self.settle_max_us is not None:
+            for test in ("load_transient", "line_transient"):
+                put(f"{test}.up_settle_us", None, self.settle_max_us)
+                put(f"{test}.down_settle_us", None, self.settle_max_us)
+        return out
+
+
 class JobSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(default="", max_length=80)
+    engine: Literal["ngspice", "ltspice", "mock"] | None = Field(
+        default=None, description="Simulator for this job; the server default (ngspice) when omitted"
+    )
     mode: Literal["circuit", "subckt"] = "circuit"
     circuit: CircuitMapping | None = None
     subckt: SubcktMapping | None = None
     design: Design
     tests: list[str] = Field(default_factory=lambda: list(TEST_NAMES))
     limits: dict[str, Limit] = Field(default_factory=dict)
+    tolerance: Tolerance | None = None
+    notes: str = Field(default="", max_length=2000, description="Free-text notes shown in the report")
+
+    def effective_limits(self) -> dict[str, Limit]:
+        """Explicit limits plus the ones derived from ``tolerance`` (explicit wins)."""
+        merged: dict[str, Limit] = {}
+        if self.tolerance is not None:
+            for k, v in self.tolerance.derived_limits(self.design.vout_nom, self.tests).items():
+                merged[k] = Limit.model_validate(v)
+        merged.update(self.limits)
+        return merged
 
     @field_validator("name")
     @classmethod

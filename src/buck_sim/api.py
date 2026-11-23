@@ -10,6 +10,7 @@ import logging
 import re
 import time
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -24,10 +25,14 @@ from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__
+from . import ai
+from .bom import BOM_EXTS, BomError, cross_check, parse_bom
 from .config import Settings
-from .engines import create_engine
+from .engines import EngineRegistry
 from .engines.base import Engine
-from .netlist import NetlistError, NetlistLoader, inspect as inspect_netlist
+from .netlist import NetlistError, NetlistLoader, decode_bytes, inspect as inspect_netlist
+from .report import build_content, load_waveforms, render_docx, render_pdf
+from .topology import describe as describe_topology
 from .registry import METRICS, TEST_LABELS, TEST_NAMES
 from .runner import JobInputError, prepare
 from .spec import JobSpec
@@ -152,8 +157,19 @@ async def _read_upload(f: UploadFile, limit: int, label: str) -> bytes:
     return data
 
 
-async def parse_upload(request: Request, *, need_spec: bool) -> tuple[dict[str, bytes], str, str | None]:
-    """Return (files, netlist_name, spec_json). Files are keyed by sanitised name."""
+@dataclass
+class Upload:
+    files: dict[str, bytes]  # netlist + model files, keyed by sanitised name
+    netlist_name: str
+    spec_json: str | None
+    bom_name: str | None = None
+    bom: bytes | None = None
+    engine: str | None = None  # optional form field (inspect / AI)
+    subckt: str | None = None
+
+
+async def parse_upload(request: Request, *, need_spec: bool) -> Upload:
+    """Read the multipart form: netlist, models, optional BOM, spec and small text fields."""
     s: Settings = request.app.state.settings
     cl = request.headers.get("content-length")
     if cl is None:
@@ -165,7 +181,7 @@ async def parse_upload(request: Request, *, need_spec: bool) -> tuple[dict[str, 
         raise ApiError(400, "invalid Content-Length") from e
 
     try:
-        form = await request.form(max_files=s.max_files + 2, max_fields=20)
+        form = await request.form(max_files=s.max_files + 3, max_fields=20)
     except HTTPException as e:
         raise ApiError(400, f"could not read the upload: {e.detail}") from e
     except Exception as e:
@@ -211,8 +227,24 @@ async def parse_upload(request: Request, *, need_spec: bool) -> tuple[dict[str, 
             seen.add(name.lower())
             files[name] = data
             total += len(data)
+        bom_name = bom = None
+        bom_up = form.get("bom")
+        if isinstance(bom_up, UploadFile) and bom_up.filename:
+            bom_name = safe_filename(bom_up.filename)
+            if Path(bom_name).suffix.lower() not in BOM_EXTS:
+                raise ApiError(
+                    422, f"BOM must be one of {sorted(BOM_EXTS)} (export Excel BOMs as CSV), got {bom_name!r}"
+                )
+            bom = await _read_upload(bom_up, s.max_netlist_bytes, "BOM")
+            total += len(bom)
         if total > s.max_total_upload_bytes:
             raise ApiError(413, "total upload is too large")
+
+        def text_field(name: str, limit: int = 64) -> str | None:
+            v = form.get(name)
+            if v is None or isinstance(v, UploadFile):
+                return None
+            return v.strip()[:limit] or None
 
         spec_json: str | None = None
         if need_spec:
@@ -222,7 +254,7 @@ async def parse_upload(request: Request, *, need_spec: bool) -> tuple[dict[str, 
             if len(raw) > 100_000:
                 raise ApiError(413, "spec is too large")
             spec_json = raw
-        return files, netlist_name, spec_json
+        return Upload(files, netlist_name, spec_json, bom_name, bom, text_field("engine"), text_field("subckt"))
     finally:
         await form.close()
 
@@ -250,20 +282,32 @@ async def readyz(request: Request) -> Response:
     return PlainTextResponse("ready", headers={"Cache-Control": "no-store"})
 
 
+async def _engine_version(app, engine: Engine) -> str:
+    key = f"version:{engine.name}"
+    if key not in app.state.cache:
+        app.state.cache[key] = await run_in_threadpool(engine.version)
+    return app.state.cache[key]
+
+
 async def get_config(request: Request) -> Response:
     app = request.app
     s: Settings = app.state.settings
+    registry: EngineRegistry = app.state.engines
     engine: Engine = app.state.engine
-    if "engine_version" not in app.state.cache:
-        app.state.cache["engine_version"] = await run_in_threadpool(engine.version)
+    engines = registry.describe()
+    for e in engines:
+        e["version"] = await _engine_version(app, registry.get(e["name"]))
     return json_response(
         {
             "app_version": __version__,
             "engine": {
                 "name": engine.name,
-                "version": app.state.cache["engine_version"],
+                "version": await _engine_version(app, engine),
                 "synthetic": engine.synthetic,
             },
+            "engines": engines,
+            "ai_enabled": ai.ai_enabled() or app.state.ai_client is not None,
+            "bom_extensions": sorted(BOM_EXTS),
             "auth_required": bool(s.api_key),
             "tests": [{"name": t, "label": TEST_LABELS[t]} for t in TEST_NAMES],
             "metrics": {k: {"unit": u, "label": lbl} for k, (u, lbl) in METRICS.items()},
@@ -282,6 +326,7 @@ EXAMPLE_FILES = {
     "buck_demo.cir": "text/plain",
     "buck_demo_subckt.cir": "text/plain",
     "toyctrl.lib": "text/plain",
+    "buck_demo_bom.csv": "text/csv",
     "buck_demo.spec.json": "application/json",
     "buck_demo_subckt.spec.json": "application/json",
 }
@@ -298,43 +343,92 @@ async def get_example(request: Request) -> Response:
     )
 
 
+def _pick_engine(request: Request, name: str | None) -> Engine:
+    registry: EngineRegistry = request.app.state.engines
+    try:
+        return registry.get(name)
+    except ValueError as e:
+        raise ApiError(422, f"{e}; available: {registry.names()}") from e
+
+
+def _analyse(up: Upload, engine: Engine, s: Settings) -> dict:
+    libs = s.builtin_libs if engine.supports_builtin_libs else frozenset()
+    parsed = NetlistLoader(up.files, builtin_libs=libs).load_main(up.netlist_name)
+    info = inspect_netlist(parsed.statements)
+    info["warnings"] = list(parsed.warnings)
+    info["statements"] = len(parsed.statements)
+    info["topology"] = describe_topology(parsed.statements, up.subckt)
+    info["bom"] = None
+    if up.bom is not None:
+        try:
+            items = parse_bom(up.bom)
+            info["bom"] = {"name": up.bom_name, **cross_check(items, info["topology"]["elements"])}
+        except BomError as e:
+            info["bom"] = {"name": up.bom_name, "error": str(e)}
+    for m in info["topology"]["models"]["vendor"]:
+        if m["source"] == "missing":
+            hint = " (LTspice may provide it from its library)" if engine.supports_builtin_libs else ""
+            info["warnings"].append(f"{m['element']}: model {m['model']!r} is not defined in the uploaded files{hint}")
+    info["engine"] = engine.name
+    return info
+
+
 async def post_inspect(request: Request) -> Response:
     s: Settings = request.app.state.settings
-    engine: Engine = request.app.state.engine
-    files, netlist_name, _ = await parse_upload(request, need_spec=False)
-    libs = s.builtin_libs if engine.supports_builtin_libs else frozenset()
-
-    def work() -> dict:
-        parsed = NetlistLoader(files, builtin_libs=libs).load_main(netlist_name)
-        info = inspect_netlist(parsed.statements)
-        info["warnings"] = parsed.warnings
-        info["statements"] = len(parsed.statements)
-        return info
-
+    up = await parse_upload(request, need_spec=False)
+    engine = _pick_engine(request, up.engine)
     try:
-        info = await run_in_threadpool(work)
+        info = await run_in_threadpool(_analyse, up, engine, s)
     except NetlistError as e:
         raise ApiError(422, str(e)) from e
     return json_response(info)
+
+
+async def post_ai_explain(request: Request) -> Response:
+    app = request.app
+    if not ai.ai_enabled() and app.state.ai_client is None:
+        raise ApiError(503, "AI help is not configured on this server (set ANTHROPIC_API_KEY and restart).")
+    host = request.client.host if request.client else "unknown"
+    if not app.state.limiter.allow(host + ":ai"):
+        raise ApiError(429, "too many requests; please wait a minute")
+    up = await parse_upload(request, need_spec=False)
+    engine = _pick_engine(request, up.engine)
+    try:
+        info = await run_in_threadpool(_analyse, up, engine, app.state.settings)
+    except NetlistError as e:
+        raise ApiError(422, str(e)) from e
+    netlist_text = decode_bytes(up.files[up.netlist_name])
+    bom_items = (info["bom"] or {}).get("items")
+    try:
+        out = await run_in_threadpool(ai.explain, netlist_text, info["topology"], bom_items, app.state.ai_client)
+    except ai.AiUnavailable as e:
+        raise ApiError(502, str(e)) from e
+    return json_response(out)
 
 
 async def post_job(request: Request) -> Response:
     app = request.app
     s: Settings = app.state.settings
     store: JobStore = app.state.store
-    engine: Engine = app.state.engine
     client = request.client.host if request.client else "unknown"
     if not app.state.limiter.allow(client):
         raise ApiError(429, "too many requests; please wait a minute")
     if await run_in_threadpool(store.count_queued) >= s.queue_max:
         raise ApiError(503, "the job queue is full; try again later")
 
-    files, netlist_name, spec_json = await parse_upload(request, need_spec=True)
+    up = await parse_upload(request, need_spec=True)
+    files, netlist_name, spec_json = up.files, up.netlist_name, up.spec_json
     assert spec_json is not None
     try:
         spec = JobSpec.model_validate_json(spec_json)
     except ValidationError as e:
         raise ApiError(422, "invalid job specification", _validation_details(e)) from e
+    engine = _pick_engine(request, spec.engine)
+    if up.bom is not None:
+        try:
+            parse_bom(up.bom)
+        except BomError as e:
+            raise ApiError(422, f"BOM: {e}") from e
 
     try:
         _, warnings = await run_in_threadpool(prepare, files, netlist_name, spec, engine, s)
@@ -344,10 +438,15 @@ async def post_job(request: Request) -> Response:
     job_id = new_job_id()
     models = [n for n in files if n != netlist_name]
     manifest = {"netlist": netlist_name, "models": models, "all": [netlist_name, *models]}
+    stored = dict(files)
+    if up.bom is not None and up.bom_name:
+        bom_key = "bom__" + up.bom_name  # prefix keeps it apart from model files of the same name
+        manifest["bom"] = bom_key
+        stored[bom_key] = up.bom
 
     def persist() -> None:
         try:
-            store.write_inputs(job_id, files)
+            store.write_inputs(job_id, stored)
             store.insert(
                 job_id,
                 name=spec.name or netlist_name,
@@ -478,6 +577,51 @@ async def get_report_csv(request: Request) -> Response:
     )
 
 
+def _report_inputs(store: JobStore, job: dict) -> tuple[dict, dict, list[dict] | None]:
+    job_dir = store.job_dir(job["id"])
+    results = json.loads((job_dir / "results.json").read_text(encoding="utf-8"))
+    waveforms = load_waveforms(job_dir, results)
+    bom = None
+    bom_key = (job.get("files") or {}).get("bom")
+    if bom_key:
+        try:
+            bom = parse_bom(store.read_inputs(job["id"], [bom_key])[bom_key])
+        except (BomError, OSError, KeyError):
+            bom = None
+    return results, waveforms, bom
+
+
+async def get_report_doc(request: Request) -> Response:
+    job = await _require_job(request)
+    kind = request.path_params["fmt"]
+    if kind not in ("pdf", "docx"):
+        raise ApiError(404, "unknown report format")
+    store: JobStore = request.app.state.store
+    if job["status"] not in FINISHED or not (store.job_dir(job["id"]) / "results.json").exists():
+        raise ApiError(404, "results not available")
+
+    def build() -> bytes:
+        results, waveforms, bom = _report_inputs(store, job)
+        content = build_content(job, results, waveforms, bom)
+        return render_pdf(content) if kind == "pdf" else render_docx(content)
+
+    data = await run_in_threadpool(build)
+    media = (
+        "application/pdf"
+        if kind == "pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    stem = re.sub(r"[^A-Za-z0-9_-]+", "_", job["name"] or "buck-sim").strip("_")[:40] or "buck-sim"
+    return Response(
+        data,
+        media_type=media,
+        headers={
+            "Content-Disposition": f'attachment; filename="{stem}-{job["id"][:8]}.{kind}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 async def cancel_job(request: Request) -> Response:
     job = await _require_job(request)
     state = await run_in_threadpool(request.app.state.store.cancel, job["id"])
@@ -515,10 +659,11 @@ async def not_found_api(_: Request, exc: Exception) -> Response:
     return json_response({"error": exc.detail}, exc.status_code)
 
 
-def create_app(settings: Settings | None = None, engine: Engine | None = None) -> Starlette:
+def create_app(settings: Settings | None = None, engine: Engine | None = None, ai_client=None) -> Starlette:
     settings = settings or Settings.from_env()
     settings.validate()
-    engine = engine or create_engine(settings)
+    registry = EngineRegistry(settings, engine)
+    engine = registry.get()
     store = JobStore(settings.data_dir)
 
     routes = [
@@ -527,6 +672,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         Route("/api/config", get_config),
         Route("/api/examples/{name}", get_example),
         Route("/api/inspect", post_inspect, methods=["POST"]),
+        Route("/api/ai/explain", post_ai_explain, methods=["POST"]),
         Route("/api/jobs", post_job, methods=["POST"]),
         Route("/api/jobs", list_jobs, methods=["GET"]),
         Route("/api/jobs/{job_id}", get_job, methods=["GET"]),
@@ -536,6 +682,7 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
         Route("/api/jobs/{job_id}/log", get_log),
         Route("/api/jobs/{job_id}/testbench/{test}/{bundle}", get_testbench),
         Route("/api/jobs/{job_id}/report.csv", get_report_csv),
+        Route("/api/jobs/{job_id}/report.{fmt}", get_report_doc),
         Mount("/", app=StaticFiles(directory=str(STATIC_DIR), html=True), name="static"),
     ]
     app = Starlette(
@@ -548,6 +695,8 @@ def create_app(settings: Settings | None = None, engine: Engine | None = None) -
     )
     app.state.settings = settings
     app.state.engine = engine
+    app.state.engines = registry
+    app.state.ai_client = ai_client
     app.state.store = store
     app.state.limiter = RateLimiter(settings.rate_limit_per_min)
     app.state.cache = {}

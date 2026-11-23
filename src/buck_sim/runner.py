@@ -159,7 +159,7 @@ def _run_test(
             result["points"] = points
             result["metrics"] = regulation_summary(test, points, spec.design)
             result["x_label"] = "Vin (V)" if test == "line_regulation" else "Load current (A)"
-        result["checks"] = evaluate_limits(test, result["metrics"], spec.limits)
+        result["checks"] = evaluate_limits(test, result["metrics"], spec.effective_limits())
     except JobCancelled:
         raise
     except EngineError as e:
@@ -239,6 +239,7 @@ def run_job(
         "tests": tests,
         "metric_info": {k: {"unit": u, "label": lbl} for k, (u, lbl) in METRICS.items()},
         "duration_s": round(time.monotonic() - started, 3),
+        "limits_applied": {k: v.model_dump() for k, v in spec.effective_limits().items()},
     }
     write_json_atomic(job_dir / "results.json", results)
     return results
