@@ -419,7 +419,8 @@ async function loadExample() {
 function applySpec(spec) {
   for (const f of DESIGN_FIELDS) {
     const v = spec.design[f.key];
-    state.inputs[f.key].value = v === undefined ? "" : String(Number((v / (f.scale || 1)).toPrecision(10)));
+    // Fields the spec does not set fall back to the form default (optional ones stay blank).
+    state.inputs[f.key].value = v === undefined ? String(f.def) : String(Number((v / (f.scale || 1)).toPrecision(10)));
   }
   $("#job-name").value = spec.name || "";
   for (const [n, cb] of Object.entries(state.testBoxes)) cb.checked = (spec.tests || []).includes(n);
