@@ -1,0 +1,26 @@
+* Demo closed-loop buck: 12 V -> 5 V, 2 A, 500 kHz  (circuit mode example)
+* Upload together with toyctrl.lib. Map:  vin_source = V1, vout_node = out, load_element = Rload
+*
+V1 in 0 12
+* --- power stage ---
+S1 in sw gate 0 SWH
+.model SWH SW(Ron=20m Roff=1Meg Vt=2.5 Vh=0.1)
+D1 0 sw DSCH
+.model DSCH D(Is=1e-6 N=1.05 Rs=30m Cjo=100p)
+L1 sw lx 10u
+RL lx out 20m
+Cout out cesr 47u
+Resr cesr 0 10m
+Rload out 0 2.5
+* --- feedback divider (5 V -> 2.5 V) and Type III compensation ---
+Rtop out fb 10k
+Rbot fb 0 10k
+Rlead out n3 412
+Clead n3 fb 2.7n
+Rz comp n2 2.7k
+Cz n2 fb 10n
+Cp comp fb 68p
+* --- controller "IC" ---
+.include "toyctrl.lib"
+X1 fb comp gate 0 TOYCTRL
+.end

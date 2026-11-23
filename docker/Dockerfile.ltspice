@@ -1,0 +1,59 @@
+# EXPERIMENTAL: API + worker image that runs LTspice under Wine.
+#
+# * NOT verified by the author of this repository: expect to adjust it (see docs/SETUP_GUIDE.md, step 6).
+# * LICENSE: build this image yourself and keep it PRIVATE. Do not push an image that contains
+#   LTspice to a public registry unless Analog Devices' license terms allow that.
+#
+# Build:  docker build -f docker/Dockerfile.ltspice -t buck-sim:ltspice .
+FROM debian:bookworm-slim
+
+ARG LTSPICE_URL=https://ltspice.analog.com/software/LTspice64.msi
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    WINEDEBUG=-all \
+    WINEARCH=win64
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wine wine64 xvfb xauth tini ca-certificates curl \
+        python3 python3-venv python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 10001 app && mkdir -p /data /opt/ltspice && chown app:app /data /opt/ltspice
+
+USER app
+WORKDIR /home/app
+
+# Install LTspice into the app user's Wine prefix, then expose a stable path to the executable.
+RUN curl -fsSL -o /tmp/LTspice64.msi "$LTSPICE_URL" \
+    && xvfb-run -a wine wineboot --init \
+    && xvfb-run -a wine msiexec /i /tmp/LTspice64.msi /qn \
+    && LT_EXE="$(find /home/app/.wine -iname 'LTspice.exe' | head -n 1)" \
+    && test -n "$LT_EXE" \
+    && ln -s "$LT_EXE" /opt/ltspice/LTspice.exe \
+    && rm -f /tmp/LTspice64.msi
+
+USER root
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install .
+ENV PATH="/opt/venv/bin:${PATH}"
+
+USER app
+ENV DATA_DIR=/data \
+    ENGINE=ltspice \
+    LTSPICE_CMD="xvfb-run -a wine /opt/ltspice/LTspice.exe" \
+    HOST=0.0.0.0 \
+    PORT=8000 \
+    LOG_FORMAT=json
+VOLUME ["/data"]
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"
+
+ENTRYPOINT ["tini", "--"]
+CMD ["buck-sim", "serve"]

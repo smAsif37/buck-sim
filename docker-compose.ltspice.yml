@@ -1,0 +1,19 @@
+# Override: run the LTspice-under-Wine image instead of the ngspice image.
+#   docker compose -f docker-compose.yml -f docker-compose.ltspice.yml up --build
+# Read docker/Dockerfile.ltspice first (experimental, license notes).
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.ltspice
+    image: buck-sim:ltspice
+    environment:
+      ENGINE: ltspice
+      LTSPICE_CMD: xvfb-run -a wine /opt/ltspice/LTspice.exe
+  worker:
+    image: buck-sim:ltspice
+    environment:
+      ENGINE: ltspice
+      LTSPICE_CMD: xvfb-run -a wine /opt/ltspice/LTspice.exe
+    # Wine needs a writable home/prefix and /tmp; do not use a read-only root fs here.
+    read_only: false

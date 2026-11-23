@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# runtime data and secrets
+data/
+.env
+*.raw
+*.log
+
+# vendor / licensed material: never commit LTspice installers or proprietary IC models
+*.msi
+*.exe
+/models-private/

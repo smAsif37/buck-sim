@@ -1,0 +1,14 @@
+* TOYCTRL - behavioural voltage-mode buck controller. EDUCATIONAL TOY MODEL, not a real IC.
+* Stands in for a vendor "IC model" file that you upload next to your netlist.
+*
+* Pins : FB    = feedback input (regulates to 2.5 V)
+*        COMP  = error-amplifier output (connect your compensation network FB <-> COMP)
+*        GATE  = PWM output, 0 V / 5 V, 500 kHz, duty = V(COMP) / 1 V
+*        GND   = ground (must be node 0 / the circuit ground)
+* Reference soft-starts from 0 V to 2.5 V in 400 us.
+.subckt TOYCTRL fb comp gate gnd
+Vref vref gnd PWL(0 0 400u 2.5)
+Eamp comp gnd vref fb 100k
+Vramp ramp gnd PULSE(0 1 0 1.996u 2n 2n 2u)
+Bpwm gate gnd V=5*u(V(comp)-V(ramp))
+.ends TOYCTRL

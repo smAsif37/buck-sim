@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Buck Converter Simulator</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>Buck Converter Simulator</h1>
+    <nav>
+      <button id="nav-new" class="tab active" type="button">New simulation</button>
+      <button id="nav-jobs" class="tab" type="button">Jobs</button>
+    </nav>
+    <span id="engine-badge" class="badge"></span>
+  </header>
+
+  <div id="banner" class="banner hidden" role="alert"></div>
+
+  <main>
+    <section id="view-new">
+      <div class="card">
+        <h2>1. Upload</h2>
+        <p class="hint">Upload a SPICE netlist (<code>.cir</code>, <code>.net</code>, <code>.sp</code>) of your buck converter
+          and any IC model files it includes. LTspice schematics (<code>.asc</code>): use <em>View &rarr; SPICE Netlist</em> first.</p>
+        <div class="row">
+          <label>Netlist <input id="file-netlist" type="file"></label>
+          <label>Model files (optional) <input id="file-models" type="file" multiple></label>
+          <button id="btn-inspect" type="button">Analyze files</button>
+        </div>
+        <div id="inspect-msg" class="msg"></div>
+      </div>
+
+      <div class="card" id="card-setup">
+        <h2>2. Circuit mapping</h2>
+        <div class="row">
+          <label><input type="radio" name="mode" value="circuit" checked> Complete circuit (source and load included)</label>
+          <label><input type="radio" name="mode" value="subckt"> Subcircuit (<code>.subckt</code> with VIN / VOUT / GND pins)</label>
+        </div>
+        <div id="mapping" class="grid"></div>
+      </div>
+
+      <div class="card">
+        <h2>3. Operating range</h2>
+        <div id="design-fields" class="grid"></div>
+      </div>
+
+      <div class="card">
+        <h2>4. Tests and pass/fail limits</h2>
+        <div id="tests" class="row wrap"></div>
+        <h3>Limits (optional)</h3>
+        <div class="row wrap">
+          <label>Metric <select id="limit-metric"></select></label>
+          <label>Min <input id="limit-min" type="number" step="any"></label>
+          <label>Max <input id="limit-max" type="number" step="any"></label>
+          <button id="btn-add-limit" type="button">Add limit</button>
+        </div>
+        <ul id="limit-list" class="plain"></ul>
+      </div>
+
+      <div class="card">
+        <h2>5. Run</h2>
+        <label>Job name <input id="job-name" type="text" maxlength="80" placeholder="optional"></label>
+        <div class="row">
+          <button id="btn-run" type="button" class="primary" disabled>Run simulations</button>
+          <button id="btn-example" type="button">Load demo example</button>
+        </div>
+        <div id="run-msg" class="msg"></div>
+      </div>
+    </section>
+
+    <section id="view-jobs" class="hidden">
+      <div class="card">
+        <h2>Jobs</h2>
+        <table id="jobs-table" class="data">
+          <thead><tr><th>Name</th><th>Status</th><th>Result</th><th>Created</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="job-detail"></div>
+    </section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

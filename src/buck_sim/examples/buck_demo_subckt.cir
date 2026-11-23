@@ -1,0 +1,26 @@
+* Demo buck as a subcircuit: ports VIN VOUT GND   (subckt mode example)
+* Upload together with toyctrl.lib. The service adds the input source and the load.
+*
+.include "toyctrl.lib"
+.subckt BUCK VIN VOUT GND
+* --- power stage ---
+S1 VIN sw gate GND SWH
+.model SWH SW(Ron=20m Roff=1Meg Vt=2.5 Vh=0.1)
+D1 GND sw DSCH
+.model DSCH D(Is=1e-6 N=1.05 Rs=30m Cjo=100p)
+L1 sw lx 10u
+RL lx VOUT 20m
+Cout VOUT cesr 47u
+Resr cesr GND 10m
+* --- feedback divider and Type III compensation ---
+Rtop VOUT fb 10k
+Rbot fb GND 10k
+Rlead VOUT n3 412
+Clead n3 fb 2.7n
+Rz comp n2 2.7k
+Cz n2 fb 10n
+Cp comp fb 68p
+* --- controller "IC" ---
+X1 fb comp gate GND TOYCTRL
+.ends BUCK
+.end

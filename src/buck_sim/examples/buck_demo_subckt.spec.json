@@ -1,0 +1,23 @@
+{
+  "name": "Demo buck subcircuit 12V to 5V, 2A",
+  "mode": "subckt",
+  "subckt": {
+    "subckt": "BUCK",
+    "vin_pin": "VIN",
+    "vout_pin": "VOUT",
+    "gnd_pin": "GND",
+    "ties": {}
+  },
+  "design": {
+    "vin_min": 9,
+    "vin_nom": 12,
+    "vin_max": 15,
+    "vout_nom": 5,
+    "iout_max": 2,
+    "iout_min": 0.5,
+    "fsw_hz": 500000,
+    "startup_time_s": 0.0015,
+    "hold_time_s": 0.0006
+  },
+  "tests": ["steady_state", "load_transient"]
+}

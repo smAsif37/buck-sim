@@ -1,0 +1,70 @@
+# Default stack: web/API + one worker, ngspice engine.
+#   docker compose up --build            # start
+#   docker compose up -d --scale worker=3
+# For LTspice use:  docker compose -f docker-compose.yml -f docker-compose.ltspice.yml up --build
+
+x-app-env: &app-env
+  DATA_DIR: /data
+  ENGINE: ${ENGINE:-ngspice}
+  API_KEY: ${API_KEY:-}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  SIM_TIMEOUT_S: ${SIM_TIMEOUT_S:-300}
+  JOB_TIMEOUT_S: ${JOB_TIMEOUT_S:-3600}
+  SIM_PARALLELISM: ${SIM_PARALLELISM:-1}
+  RETENTION_DAYS: ${RETENTION_DAYS:-30}
+  QUEUE_MAX: ${QUEUE_MAX:-200}
+  RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-60}
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: buck-sim:local
+    command: ["buck-sim", "serve"]
+    environment: *app-env
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - data:/data
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  worker:
+    image: buck-sim:local
+    command: ["buck-sim", "worker"]
+    environment: *app-env
+    volumes:
+      - data:/data
+    depends_on:
+      - api
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      disable: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The worker runs untrusted netlists through a simulator: keep it boxed in.
+    networks:
+      - isolated
+    mem_limit: 4g
+    pids_limit: 256
+
+networks:
+  isolated:
+    internal: true
+
+volumes:
+  data:

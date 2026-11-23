@@ -1,0 +1,31 @@
+{
+  "name": "Demo buck 12V to 5V, 2A",
+  "mode": "circuit",
+  "circuit": {
+    "vin_source": "V1",
+    "vout_node": "out",
+    "load_element": "Rload",
+    "gnd_node": "0"
+  },
+  "design": {
+    "vin_min": 9,
+    "vin_nom": 12,
+    "vin_max": 15,
+    "vout_nom": 5,
+    "iout_max": 2,
+    "iout_min": 0.5,
+    "fsw_hz": 500000,
+    "startup_time_s": 0.0015,
+    "hold_time_s": 0.0006
+  },
+  "tests": ["steady_state", "load_transient", "line_transient", "line_regulation", "load_regulation"],
+  "limits": {
+    "steady_state.vout_error_pct": { "min": -2, "max": 2 },
+    "steady_state.ripple_pp_v": { "max": 0.05 },
+    "steady_state.efficiency_pct": { "min": 85 },
+    "load_transient.up_peak_dev_v": { "max": 0.25 },
+    "load_transient.up_settle_us": { "max": 300 },
+    "line_regulation.line_reg_pct": { "max": 1.0 },
+    "load_regulation.load_reg_pct": { "max": 1.0 }
+  }
+}
