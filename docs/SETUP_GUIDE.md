@@ -81,7 +81,10 @@ Expected last line: `SELF-TEST PASSED for the software pipeline only`.
 sudo apt-get install -y ngspice
 # macOS
 brew install ngspice
-# Windows: install ngspice from https://ngspice.sourceforge.io and put ngspice.exe on PATH (or set NGSPICE_CMD)
+# Windows: download ngspice-<ver>_64.7z from https://sourceforge.net/projects/ngspice/files/ng-spice-rework/,
+#   extract the Spice64 folder (e.g. to %LOCALAPPDATA%\Programs\Spice64) and add Spice64\bin to PATH.
+#   The app uses the console build ngspice_con.exe automatically (ngspice.exe is a GUI build with no stdout),
+#   or set NGSPICE_CMD to its full path.
 
 ngspice --version
 buck-sim selftest --engine ngspice
